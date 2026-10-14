@@ -11,19 +11,17 @@ int perform_raycast(float px, float py, float pz,
         int bx=(int)(px+dx*d);
         int by=(int)(py+dy*d);
         int bz=(int)(pz+dz*d);
-        if (bx>=0&&bx<CHUNK_SIZE_X&&by>=0&&by<CHUNK_SIZE_Y&&bz>=0&&bz<CHUNK_SIZE_Z) {
-            if (block_registry[chunk_blocks[bx][by][bz]].is_solid) {
-                *hx=bx; *hy=by; *hz=bz;
-                if (lbx != -1) {
-                    if      (lby>by) *fd=FACE_TOP;
-                    else if (lby<by) *fd=FACE_BOTTOM;
-                    else if (lbx>bx) *fd=FACE_RIGHT;
-                    else if (lbx<bx) *fd=FACE_LEFT;
-                    else if (lbz>bz) *fd=FACE_FRONT;
-                    else             *fd=FACE_BACK;
-                } else { *fd=FACE_TOP; }
-                return 1;
-            }
+        if (by >= 0 && by < CHUNK_SIZE_Z && chunk_is_solid(bx, by, bz)) {
+            *hx=bx; *hy=by; *hz=bz;
+            if (lbx != -1) {
+                if      (lby<by) *fd=FACE_BOTTOM;
+                else if (lby>by) *fd=FACE_TOP;
+                else if (lbx<bx) *fd=FACE_LEFT;
+                else if (lbx>bx) *fd=FACE_RIGHT;
+                else if (lbz<bz) *fd=FACE_BACK;
+                else             *fd=FACE_FRONT;
+            } else { *fd=FACE_TOP; }
+            return 1;
         }
         lbx=bx; lby=by; lbz=bz;
         d += 0.01f;

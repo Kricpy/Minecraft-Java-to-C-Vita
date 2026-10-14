@@ -23,6 +23,11 @@ typedef struct {
     int   fwd_tap_count;
     float fwd_tap_timer;
     int   fwd_held_last;
+    // Health/death
+    int health;
+    int max_health;
+    int dead;
+    int respawn_timer;
 } Player;
 
 void player_init(Player *p);
