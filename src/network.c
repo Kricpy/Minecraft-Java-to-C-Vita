@@ -879,9 +879,13 @@ static void handle_respawn(RCUR *r) {
         g_player->render_z = g_player->z;
         g_player->on_ground = 1;
     }
+    /* Server's Respawn packet means the world is ready — clear the
+       death screen so the player can play again. Setting show_respawn=1
+       here was a bug: it hid the respawn menu the moment the server
+       replied, so pressing O/X had nothing to act on. */
     extern int show_respawn;
-    show_respawn = 1;
-    log_debug("respawn: show_respawn=1");
+    show_respawn = 0;
+    log_debug("respawn: server respawn received, show_respawn=0");
 }
 
 static void handle_disconnect(const char *stage, RCUR *r) {
@@ -986,10 +990,13 @@ static void net_dispatch_play(const uint8_t *pk, int32_t len) {
             log_debug("play: entity equipment");
             break;
         case 0x41: /* SPacketUpdateHealth */
-            rc_f32(&r); // health
-            rc_varint(&r); // food
-            rc_f32(&r); // food saturation
-            log_debug("play: update health");
+            {
+                float h = rc_f32(&r); // health
+                rc_varint(&r); // food
+                rc_f32(&r); // food saturation
+                if (g_player) g_player->health = h;
+                log_debug("play: update health=%.1f", h);
+            }
             break;
         case 0x47: /* SPacketTimeUpdate */
             rc_u64(&r); // world age
@@ -1302,9 +1309,12 @@ void net_tick(Player *p) {
 }
 
 void net_send_respawn(void) {
+    /* 1.12.2 ClientStatus (0x0B), NOT 0x03.
+       0x03 is a login packet ID — the server rejects it as unknown
+       during play, so the respawn never reaches it. */
     uint8_t body[1];
-    size_t n = put_varint(body, 0); // action=0 (respawn)
-    pkt_send(0x03, body, n);
+    size_t n = put_varint(body, 0); // action=0 (PERFORM_RESPAWN)
+    pkt_send(0x0B, body, n);
 }
 
 void net_send_player_action(int action) {

@@ -752,19 +752,6 @@ Player player;
         glRotatef(player.yaw + 180.0f, 0,1,0);
         glTranslatef(-player.render_x, -(player.render_y+current_eye), -player.render_z);
 
-        /* Pull back the exact modelview matrix so frustum culling in
-           draw_all_chunks uses the SAME matrix as rendering.  glGetFloatv
-           returns column-major; the frustum extractor expects row-major,
-           so transpose in place.  This guarantees culling matches drawing,
-           which fixes the white patches and block-outline drift. */
-        glGetFloatv(GL_MODELVIEW_MATRIX, g_modl);
-        for (int i = 0; i < 4; i++)
-            for (int j = i+1; j < 4; j++) {
-                float t = g_modl[i*4+j];
-                g_modl[i*4+j] = g_modl[j*4+i];
-                g_modl[j*4+i] = t;
-            }
-
         glBindTexture(GL_TEXTURE_2D, g_atlas_tex);
         if (render_frame % 60 == 0) log_debug("render: frame %d draw_all_chunks start", render_frame);
         draw_all_chunks(player.render_x, player.render_z);
