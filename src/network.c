@@ -1318,8 +1318,18 @@ void net_send_respawn(void) {
 }
 
 void net_send_player_action(int action) {
-    uint8_t body[10];
+    /* 1.12.2 PlayerAction (0x13) requires THREE fields:
+       1. entity ID (varint) — our entity id from JoinGame
+       2. action (varint) — 0=START_SNEAKING, 1=STOP_SNEAKING,
+          3=START_SPRINTING, 4=STOP_SPRINTING
+       3. vehicle ID (varint) — 0 for player
+       Sending only the action made the server read our action byte
+       as the entity ID, then try to read 4 more bytes for the
+       vehicle ID and crash with IndexOutOfBoundsException. */
+    uint8_t body[16];
     size_t n = 0;
-    n += put_varint(body + n, action);
+    n += put_varint(body + n, g_net.entity_id);  /* entity ID */
+    n += put_varint(body + n, action);            /* action */
+    n += put_varint(body + n, 0);                 /* vehicle ID = player */
     pkt_send(0x13, body, n);
 }
