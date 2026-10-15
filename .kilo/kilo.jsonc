@@ -16,7 +16,7 @@
         "stdio"
       ],
       "environment": {
-        "GITHUB_PERSONAL_ACCESS_TOKEN": "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",
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "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",
         "GITHUB_READ_ONLY": "1"
       }
     }

@@ -190,6 +190,7 @@ static int pkt_send(uint8_t id, const uint8_t *body, size_t body_len) {
     size_t w = 0;
     if (g_net.comp_threshold >= 0) {
         wire[w++] = 0; /* uncompressed */
+        w += put_varint(wire + w, (int32_t)n); /* LENGTH — was missing! */
         memcpy(wire + w, pkt, n); w += n;
     } else {
         memcpy(wire, pkt, n); w = n;
@@ -1307,27 +1308,23 @@ void net_tick(Player *p) {
 }
 
 void net_send_respawn(void) {
-    /* 1.12.2 ClientStatus (0x0B), NOT 0x03.
-       0x03 is a login packet ID — the server rejects it as unknown
-       during play, so the respawn never reaches it. */
+    /* 1.12.2 ClientStatus (0x03), NOT 0x0B.
+       0x0B is KeepAlive — the server reads our action byte as the
+       keepalive ID, then tries to read a varint payload and crashes. */
     uint8_t body[1];
     size_t n = put_varint(body, 0); // action=0 (PERFORM_RESPAWN)
-    pkt_send(0x0B, body, n);
+    pkt_send(0x03, body, n);
 }
 
 void net_send_player_action(int action) {
-    /* 1.12.2 PlayerAction (0x13) requires THREE fields:
-       1. entity ID (varint) — our entity id from JoinGame
-       2. action (varint) — 0=START_SNEAKING, 1=STOP_SNEAKING,
-          3=START_SPRINTING, 4=STOP_SPRINTING
-       3. vehicle ID (varint) — 0 for player
-       Sending only the action made the server read our action byte
-       as the entity ID, then try to read 4 more bytes for the
-       vehicle ID and crash with IndexOutOfBoundsException. */
+    /* 1.12.2 PlayerAction (0x15), NOT 0x13.
+       0x13 is PlayerAbilities — the server reads our entity ID as the
+       abilities flags byte, then tries to read 4 more bytes and crashes.
+       0x15 requires: entity ID (varint) + action (varint) + auxData (varint). */
     uint8_t body[16];
     size_t n = 0;
     n += put_varint(body + n, g_net.entity_id);  /* entity ID */
     n += put_varint(body + n, action);            /* action */
-    n += put_varint(body + n, 0);                 /* vehicle ID = player */
-    pkt_send(0x13, body, n);
+    n += put_varint(body + n, 0);                 /* auxData = 0 */
+    pkt_send(0x15, body, n);
 }
