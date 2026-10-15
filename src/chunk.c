@@ -127,6 +127,22 @@ void chunk_init(Chunk *c) {
         c->blocks[i] = 0;
 }
 
+void clear_all_chunks(void) {
+    for (int cx = 0; cx < WORLD_SIZE_X; cx++)
+        for (int cz = 0; cz < WORLD_SIZE_Z; cz++) {
+            Chunk *c = &world_chunks[cx][cz];
+            if (c->loaded) {
+                chunk_free_mesh(c);
+                memset(c->blocks, 0, sizeof(c->blocks));
+                memset(c->biome, 0, sizeof(c->biome));
+                c->sections = 0;
+                c->loaded = 0;
+                c->dirty = 0;
+                c->x_off = c->z_off = 0;
+            }
+        }
+}
+
 void chunk_free_mesh(Chunk *c) {
     free(c->vertices); c->vertices = NULL;
     free(c->indices);  c->indices  = NULL;

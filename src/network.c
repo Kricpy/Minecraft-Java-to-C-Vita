@@ -188,12 +188,19 @@ static int pkt_send(uint8_t id, const uint8_t *body, size_t body_len) {
 
     uint8_t wire[8192];
     size_t w = 0;
-    if (g_net.comp_threshold >= 0) {
+    if (g_net.comp_threshold >= 0 && n > (size_t)g_net.comp_threshold) {
+        /* Compressed packet: [data_length_varint][uncompressed_length_varint][compressed_data] */
+        /* We don't have zlib in the client, so always send uncompressed.
+           The 0x00 prefix tells the server "this is not compressed". */
         wire[w++] = 0; /* uncompressed */
-        w += put_varint(wire + w, (int32_t)n); /* LENGTH — was missing! */
         memcpy(wire + w, pkt, n); w += n;
     } else {
-        memcpy(wire, pkt, n); w = n;
+        /* Small packet: still needs the 0x00 prefix!
+           Without it, the server reads the packet ID as the data_length
+           varint, thinks the packet is compressed, and rejects it with
+           "size of N is below server threshold of 256". */
+        wire[w++] = 0; /* uncompressed */
+        memcpy(wire + w, pkt, n); w += n;
     }
 
     uint8_t frame[8192];
@@ -559,11 +566,27 @@ static void handle_position_look(RCUR *r) {
         g_net.origin_cz = cz;
         g_net.have_spawn = 1;
         
-        if (was_in_play) {
+if (was_in_play) {
             int dx = cx - old_origin_cx;
             int dz = cz - old_origin_cz;
-            
-            if (dx != 0 || dz != 0) {
+
+            /* Guard: if the shift is larger than the world window, the old
+               origin was garbage (sign extension bug) — just clear all
+               chunks and start fresh instead of trying to shift. */
+            if (abs(dx) >= WORLD_SIZE_X || abs(dz) >= WORLD_SIZE_Z) {
+                log_debug("play: large shift (%d,%d) - clearing all chunks", dx, dz);
+                for (int ix = 0; ix < WORLD_SIZE_X; ix++) {
+                    for (int iz = 0; iz < WORLD_SIZE_Z; iz++) {
+                        Chunk *c = &world_chunks[ix][iz];
+                        chunk_free_mesh(c);
+                        memset(c->blocks, 0, sizeof(c->blocks));
+                        c->loaded = 0;
+                        c->vertex_count = 0;
+                        c->index_count = 0;
+                        c->dirty = 0;
+                    }
+                }
+            } else if (dx != 0 || dz != 0) {
                 log_debug("play: shifting window by (%d,%d) from (%d,%d) to (%d,%d)", dx, dz, old_origin_cx, old_origin_cz, cx, cz);
                 
                 // In-place shift: shift X first, then Z
@@ -714,24 +737,28 @@ static void handle_position_look(RCUR *r) {
 
 static void handle_spawn_position(RCUR *r) {
     uint64_t packed = rc_u64(r);
-    int32_t x = (int32_t)((packed >> 38) & 0x3FFFFFF);
-    int32_t y = (int32_t)(packed & 0xFFF);
-    int32_t z = (int32_t)((packed >> 12) & 0x3FFFFFF);
-    if (x >= (1 << 25)) x -= (1 << 26);
-    if (z >= (1 << 25)) z -= (1 << 26);
-    
+    /* 1.12.2 SpawnPosition (0x46) packed long layout:
+       x = (packed << 2) >> 52   (26 bits, signed)
+       y = (packed << 12) >> 52  (26 bits, signed)
+       z = packed >> 43           (21 bits, signed)
+       The old code used wrong bit positions and masks, producing
+       garbage values like origin_cz = 65536 which caused the
+       65522-chunk window shift crash. */
+    int32_t x = (int32_t)((int64_t)(packed << 2) >> 52);
+    int32_t y = (int32_t)((int64_t)(packed << 12) >> 52);
+    int32_t z = (int32_t)((int64_t)packed >> 43);
+
     if (x < -30000000 || x > 30000000 || y < 0 || y > 256 || z < -30000000 || z > 30000000) {
         log_debug("play: invalid spawn position %d %d %d", x, y, z);
         return;
     }
-    
+
     g_net.spawn_x = x; g_net.spawn_y = y; g_net.spawn_z = z;
-    /* Always update origin from spawn position - it's authoritative */
     g_net.origin_cx = x >> 4;
     g_net.origin_cz = z >> 4;
     g_net.have_spawn = 1;
     g_net.spawn_position_received = 1;
-    log_debug("play: Spawn Position packet (0x45) received: %d %d %d -> origin (%d,%d)", x, y, z, g_net.origin_cx, g_net.origin_cz);
+    log_debug("play: Spawn Position packet (0x46) received: %d %d %d -> origin (%d,%d)", x, y, z, g_net.origin_cx, g_net.origin_cz);
 }
 
 static void handle_chunk_data(RCUR *r) {
@@ -880,13 +907,31 @@ static void handle_respawn(RCUR *r) {
         g_player->render_z = g_player->z;
         g_player->on_ground = 1;
     }
-    /* Server's Respawn packet resets position. Do NOT show the respawn
-       screen here — the server sends Respawn on login too, and we
-       don't want a death screen on connect.  Death detection in
-       main.c handles showing the respawn screen when health=0. */
+    /* Server's Respawn packet resets position. Only hide the respawn screen
+       if the player is actually alive — if health is still 0, keep it
+       visible so the player can press O/X to respawn.  The server sends
+       Respawn before UpdateHealth, so without this check the respawn
+       screen gets hidden before the player knows they're dead. */
     extern int show_respawn;
-    show_respawn = 0;
-    log_debug("respawn: server respawn received, position reset");
+    if (!g_player || g_player->health > 0) {
+        show_respawn = 0;
+    }
+    log_debug("respawn: server respawn received, position reset (health=%.1f, show_respawn=%d)",
+              g_player ? g_player->health : -1.0f, show_respawn);
+
+    /* Clear all chunks so the server's new chunk stream starts fresh.
+       Leaving stale chunks loaded causes OOB writes when the server
+       sends new chunks at the respawn position with different offsets. */
+    extern void clear_all_chunks(void);
+    clear_all_chunks();
+    log_debug("respawn: cleared all chunks");
+
+    /* Clear all chunks so the server's new chunk stream starts fresh.
+       Leaving stale chunks loaded causes OOB writes when the server
+       sends new chunks at the respawn position with different offsets. */
+    extern void clear_all_chunks(void);
+    clear_all_chunks();
+    log_debug("respawn: cleared all chunks");
 }
 
 static void handle_disconnect(const char *stage, RCUR *r) {
@@ -1274,21 +1319,11 @@ static void net_tick_play(Player *p) {
         }
     }
 
-    /* Proactive KeepAlive: vanilla clients send one every ~15s even without
-       a server request.  If we only respond to server keepalives and the
-       server's keepalive packet is lost in the chunk flood, the server
-       kicks us for "keepalive timeout".  Sending our own every 10s keeps
-       the connection alive regardless. */
-    static SceUInt64 last_keepalive_send = 0;
-    SceUInt64 now_keepalive = sceKernelGetProcessTimeWide();
-    if (now_keepalive - last_keepalive_send >= 10000000) { /* 10 seconds */
-        last_keepalive_send = now_keepalive;
-        uint8_t body[8];
-        uint64_t ka_id = (uint64_t)now_keepalive;
-        for (int i = 0; i < 8; i++) body[i] = (uint8_t)(ka_id >> (8 * (7 - i)));
-        pkt_send(0x0B, body, 8);
-        log_debug("play: sent proactive keepalive");
-    }
+    /* Proactive KeepAlive removed — the server only accepts responses to
+       its own KeepAlive packets, not client-initiated ones.  Sending our
+       own ID causes "sent an invalid keepalive" kicks.  The server sends
+       KeepAlive (0x1F) every ~15s; handle_keep_alive() echoes it back. */
+    /* (proactive keepalive removed) */
 
     /* Only send position updates AFTER we've received Position & Look and sent Confirm Teleport.
        Throttle to ~20Hz (every 50ms) — vanilla sends position every 20 ticks (1s) when

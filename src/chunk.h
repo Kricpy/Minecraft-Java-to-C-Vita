@@ -49,5 +49,6 @@ void chunk_mark_dirty(int cx, int cz);
 void chunk_decode(int chunk_x, int chunk_z, int full_chunk,
                   int available_sections,
                   const uint8_t *data, size_t data_len);
+void clear_all_chunks(void);
 
 #endif

@@ -663,10 +663,17 @@ Player player;
             continue;
         }
 
+/* Frame time delta for player physics */
+        static SceUInt64 last_frame_time = 0;
+        SceUInt64 now_frame = sceKernelGetProcessTimeWide();
+        float frame_dt = (float)((now_frame - last_frame_time) / 1000000.0);
+        if (frame_dt <= 0.0f || frame_dt > 0.25f) frame_dt = 1.0f/60.0f;
+        last_frame_time = now_frame;
+
         /* Detect death BEFORE the respawn screen check so the screen
-          appears on the same frame death is detected.  Placing this
-          after the check meant the respawn screen was skipped on the
-          death frame, and the player never saw the menu. */
+           appears on the same frame death is detected.  Placing this
+           after the check meant the respawn screen was skipped on the
+           death frame, and the player never saw the menu. */
         if (!show_respawn && (player.y < -64.0f || player.health <= 0)) {
             show_respawn = 1;
             respawn_selection = 0;
@@ -682,6 +689,12 @@ Player player;
             vglSwapBuffers(GL_TRUE);
             continue;
         }
+
+        /* Update player physics, camera, and input.
+           player_update() was never called — the function existed but
+           the main loop skipped it, so the player couldn't move, look
+           around, jump, or crouch. */
+        player_update(&player, frame_dt);
 
         /* Send sneaking/sprint state changes to the server.
            1.12.2 Client→Server PlayerAction (0x13):
@@ -739,13 +752,16 @@ Player player;
         float fov = player.is_sprinting ? 77.0f : 70.0f;
         set_perspective(fov, 960.0f/544.0f, 0.05f, 100.0f);
 
-        /* GL rendering uses the proven glRotatef/gl Translatef chain
-           (this compiled fine before and matches vanilla camera). */
+/* GL camera.  OpenGL applies transforms in REVERSE order to vertices:
+           glRotatef(pitch) → glRotatef(yaw+180) → glTranslatef(-pos)
+           means: T(-pos) * Ry(yaw+180) * Rx(pitch) * v
+           i.e. translate world so camera is at origin, then rotate.
+           This is the correct look-at matrix. */
     glMatrixMode(GL_MODELVIEW);
-        glLoadIdentity();
-        glRotatef(player.pitch, 1,0,0);
-        glRotatef(player.yaw + 180.0f, 0,1,0);
-        glTranslatef(-player.render_x, -(player.render_y+current_eye), -player.render_z);
+    glLoadIdentity();
+    glRotatef(player.pitch, 1,0,0);
+    glRotatef(player.yaw + 180.0f, 0,1,0);
+    glTranslatef(-player.render_x, -(player.render_y+current_eye), -player.render_z);
 
         glBindTexture(GL_TEXTURE_2D, g_atlas_tex);
         if (render_frame % 60 == 0) log_debug("render: frame %d draw_all_chunks start", render_frame);
@@ -755,18 +771,16 @@ Player player;
 
         /* Block highlight from a raycast along the look direction */
         {
-            /* Raycast must use the SAME direction as the camera looks.
-               The camera is built with glRotatef(yaw+180, 0,1,0), so the
-               forward vector is (-sin(yaw+180)*cos(pitch), -sin(pitch),
-               cos(yaw+180)*cos(pitch)) = (sin(yaw)*cos(pitch), -sin(pitch),
-               -cos(yaw)*cos(pitch)).  The old code used -sin(yaw)/cos(yaw)
-               which points the opposite way and selects the block behind
-               or beside the crosshair. */
+            /* Raycast direction must match the camera's forward vector exactly.
+           Camera: glRotatef(pitch,1,0,0) * glRotatef(yaw+180,0,1,0)
+           Forward = (-sin(yaw), sin(pitch)*cos(yaw), cos(pitch)*cos(yaw))
+           The old formula used -sin(yaw)*cos(pitch)/-sin(pitch)/cos(yaw)*cos(pitch)
+           which is a different convention and points the wrong way. */
             float rad_yaw   = (player.yaw) * DEG_TO_RAD;
             float rad_pitch = player.pitch * DEG_TO_RAD;
-            float ldx = -sinf(rad_yaw) * cosf(rad_pitch);
-            float ldy = -sinf(rad_pitch);
-            float ldz =  cosf(rad_yaw) * cosf(rad_pitch);
+            float ldx = -sinf(rad_yaw);
+            float ldy = sinf(rad_pitch) * cosf(rad_yaw);
+            float ldz = cosf(rad_pitch) * cosf(rad_yaw);
             int hx, hy, hz, fd;
             if (perform_raycast(player.render_x, player.render_y + current_eye, player.render_z,
                                 ldx, ldy, ldz, &hx, &hy, &hz, &fd)) {

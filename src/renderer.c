@@ -31,10 +31,16 @@ void set_perspective(float fovy, float aspect, float near, float far) {
 }
 
 void draw_all_chunks(float px, float pz) {
-    /* Distance-only culling. The frustum extractor was culling visible
-       chunks (white strips, blocks missing when looking down) because
-       the matrix math didn't match the GL camera. A 64-block radius
-       covers the 8-chunk view distance and can't go wrong. */
+    /* Bind the atlas ONCE before the loop — binding inside the loop
+       was redundant and the atlas may not be compiled yet on the first
+       frame, leaving chunks untextured (white strips). */
+    if (g_atlas_tex) {
+        glBindTexture(GL_TEXTURE_2D, g_atlas_tex);
+    } else {
+        glDisable(GL_TEXTURE_2D);
+    }
+    /* Distance-only culling. A 64-block radius covers the 8-chunk view
+       distance and can't go wrong. */
     int drawn = 0;
     for (int cx = 0; cx < WORLD_SIZE_X; cx++) {
         for (int cz = 0; cz < WORLD_SIZE_Z; cz++) {
@@ -48,7 +54,6 @@ void draw_all_chunks(float px, float pz) {
             drawn++;
             glPushMatrix();
             glTranslatef((float)c->x_off, 0.0f, (float)c->z_off);
-            glBindTexture(GL_TEXTURE_2D, g_atlas_tex);
             glEnableClientState(GL_VERTEX_ARRAY);
             glEnableClientState(GL_TEXTURE_COORD_ARRAY);
             glVertexPointer(3, GL_FLOAT, sizeof(Vertex), &c->vertices[0].x);
@@ -59,6 +64,7 @@ void draw_all_chunks(float px, float pz) {
             glPopMatrix();
         }
     }
+    if (!g_atlas_tex) glEnable(GL_TEXTURE_2D);
     static int draw_log_count = 0;
     if (++draw_log_count % 120 == 0)
         log_debug("render: drew %d chunks (atlas=%u)", drawn, (unsigned)g_atlas_tex);
