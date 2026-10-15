@@ -879,13 +879,11 @@ static void handle_respawn(RCUR *r) {
         g_player->render_z = g_player->z;
         g_player->on_ground = 1;
     }
-    /* Server's Respawn packet means the world is ready — clear the
-       death screen so the player can play again. Setting show_respawn=1
-       here was a bug: it hid the respawn menu the moment the server
-       replied, so pressing O/X had nothing to act on. */
+    /* Server's Respawn packet means the world is ready — show the
+       respawn screen so the player can press O/X to respawn. */
     extern int show_respawn;
-    show_respawn = 0;
-    log_debug("respawn: server respawn received, show_respawn=0");
+    show_respawn = 1;
+    log_debug("respawn: server respawn received, showing respawn screen");
 }
 
 static void handle_disconnect(const char *stage, RCUR *r) {

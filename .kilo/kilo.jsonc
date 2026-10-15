@@ -1,0 +1,24 @@
+{
+  "$schema": "https://app.kilo.ai/config.json",
+  "mcp": {
+    "github": {
+      "type": "local",
+      "command": [
+        "docker",
+        "run",
+        "-i",
+        "--rm",
+        "-e",
+        "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "-e",
+        "GITHUB_READ_ONLY",
+        "ghcr.io/github/github-mcp-server@sha256:2afb26356481d1a350e14544a6e160f7f7ec1561a1ea309b823665abf0309036",
+        "stdio"
+      ],
+      "environment": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "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",
+        "GITHUB_READ_ONLY": "1"
+      }
+    }
+  }
+}

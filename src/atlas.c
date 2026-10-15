@@ -83,7 +83,7 @@ GLuint compile_dynamic_atlas() {
     unsigned char *pixels = (unsigned char*)malloc(atlas_w * atlas_h * 4);
     memset(pixels, 0, atlas_w * atlas_h * 4);
 
-    const char *base = "ux0:data/Minecraft/1.12.2/assets/minecraft/textures/blocks/";
+    const char *base = "ux0:/Minecraft/1.12.2/assets/minecraft/textures/blocks/";
 
     paste_texture(pixels, "dirt.png",       TEX_COL_DIRT,       0, base);
     paste_texture(pixels, "grass_side.png", TEX_COL_GRASS_SIDE, 0, base);
