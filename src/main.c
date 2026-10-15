@@ -623,8 +623,10 @@ Player player;
         
         if (ctrl.buttons & SCE_CTRL_START) break;
         
+        /* L + R shoulder buttons toggle the config menu. */
         int lr_held = (ctrl.buttons & SCE_CTRL_LTRIGGER) && (ctrl.buttons & SCE_CTRL_RTRIGGER);
         if (lr_held && !prev_lr_held) {
+            log_debug("main: L+R detected, toggling menu (was %d)", show_menu);
             if (menu_cooldown == 0 && !ime_active) {
                 show_menu = !show_menu;
                 menu_cooldown = 30;

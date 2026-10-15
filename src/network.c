@@ -1160,8 +1160,10 @@ static void net_process_inbound(void) {
         p = r.p + (size_t)flen;
         if (g_net.sock < 0) break;
         /* Process a few packets per frame so input/camera stays
-           responsive during the initial chunk flood. */
-        if (packets_this_call >= 3) break;
+           responsive during the initial chunk flood.  Bumped from 3 to 16
+           so KeepAlive (0x1F) responses aren't dropped in the chunk flood —
+           dropping them causes the server to kick us for keepalive timeout. */
+        if (packets_this_call >= 16) break;
     }
 
     if (p > 0) {
@@ -1272,9 +1274,30 @@ static void net_tick_play(Player *p) {
         }
     }
 
-    /* Only send position updates AFTER we've received Position & Look and sent Confirm Teleport */
-    if (position_look_received) {
-        /* CPacketPlayer.PositionRotation EVERY TICK keeps the server happy */
+    /* Proactive KeepAlive: vanilla clients send one every ~15s even without
+       a server request.  If we only respond to server keepalives and the
+       server's keepalive packet is lost in the chunk flood, the server
+       kicks us for "keepalive timeout".  Sending our own every 10s keeps
+       the connection alive regardless. */
+    static SceUInt64 last_keepalive_send = 0;
+    SceUInt64 now_keepalive = sceKernelGetProcessTimeWide();
+    if (now_keepalive - last_keepalive_send >= 10000000) { /* 10 seconds */
+        last_keepalive_send = now_keepalive;
+        uint8_t body[8];
+        uint64_t ka_id = (uint64_t)now_keepalive;
+        for (int i = 0; i < 8; i++) body[i] = (uint8_t)(ka_id >> (8 * (7 - i)));
+        pkt_send(0x0B, body, 8);
+        log_debug("play: sent proactive keepalive");
+    }
+
+    /* Only send position updates AFTER we've received Position & Look and sent Confirm Teleport.
+       Throttle to ~20Hz (every 50ms) — vanilla sends position every 20 ticks (1s) when
+       standing still, and every tick when moving.  Sending every frame (60Hz) overwhelms
+       the Vita socket buffer (kerr=32 = ENOBUF) and causes disconnects. */
+    static SceUInt64 last_pos_send = 0;
+    SceUInt64 now_pos = sceKernelGetProcessTimeWide();
+    if (position_look_received && (now_pos - last_pos_send >= 50000)) {
+        last_pos_send = now_pos;
         uint8_t buf[37];
         size_t n = 0;
         uint64_t ux, uy, uz;
