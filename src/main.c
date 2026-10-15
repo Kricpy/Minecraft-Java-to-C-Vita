@@ -414,11 +414,11 @@ void draw_menu_rect(float x, float y, float w, float h, uint32_t color) {
 
 void draw_config_menu(void) {
     draw_menu_rect(0, 0, 960, 544, 0xC0000000);
-    draw_menu_rect(180, 70, 600, 400, 0xFF181818);
+    draw_menu_rect(180, 70, 600, 470, 0xFF181818);
     draw_menu_rect(180, 70, 600, 3, 0xFF00FF00);
-    draw_menu_rect(180, 467, 600, 3, 0xFF00FF00);
-    draw_menu_rect(180, 70, 3, 400, 0xFF00FF00);
-    draw_menu_rect(777, 70, 3, 400, 0xFF00FF00);
+    draw_menu_rect(180, 537, 600, 3, 0xFF00FF00);
+    draw_menu_rect(180, 70, 3, 470, 0xFF00FF00);
+    draw_menu_rect(777, 70, 3, 470, 0xFF00FF00);
 
     draw_string(220, 95, "=== CONFIG MENU (L+R to close) ===", 0xFF00FF00, 1.0f);
 
@@ -446,12 +446,18 @@ void draw_config_menu(void) {
     draw_string(255, 358, "CONNECT", sel2 ? 0xFFFFFF00 : 0xFFAAAAAA, 1.0f);
     if (sel2) draw_string(217, 395, "> Press X to connect", 0xFF666666, 0.6f);
 
-    draw_string(220, 425, "Status:", 0xFFAAAAAA, 0.7f);
-    draw_string(290, 425, status_text, 0xFFCCCCCC, 0.7f);
+    /* Respawn button (for testing) */
+    int sel3 = (menu_selection == 3);
+    draw_menu_rect(217, 410, 200, 40, sel3 ? 0xFFFF0000 : 0xFF2A2A2A);
+    draw_string(255, 423, "RESPAWN", sel3 ? 0xFFFFFF00 : 0xFFAAAAAA, 1.0f);
+    if (sel3) draw_string(217, 460, "> Press X to respawn", 0xFF666666, 0.6f);
+
+    draw_string(220, 500, "Status:", 0xFFAAAAAA, 0.7f);
+    draw_string(290, 500, status_text, 0xFFCCCCCC, 0.7f);
 
     char build_ver[64];
     snprintf(build_ver, sizeof(build_ver), "Build: %s %s", __DATE__, __TIME__);
-    draw_string(600, 452, build_ver, 0xFF666666, 0.6f);
+    draw_string(600, 527, build_ver, 0xFF666666, 0.6f);
 }
 
 void draw_respawn_screen(void) {
@@ -481,14 +487,6 @@ void draw_respawn_screen(void) {
 void handle_respawn_input(const SceCtrlData *ctrl) {
     if (respawn_cooldown > 0) {
         respawn_cooldown--;
-        return;
-    }
-    /* L + R = instant respawn (bypasses button selection) */
-    if ((ctrl->buttons & (SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER)) == (SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER)) {
-        log_debug("respawn: L+R pressed, instant respawn");
-        show_respawn = 0;
-        respawn_cooldown = 30;
-        net_send_respawn();
         return;
     }
     if (ctrl->buttons & SCE_CTRL_UP) {
@@ -529,11 +527,11 @@ void handle_menu_input(const SceCtrlData *ctrl) {
     prev_buttons = ctrl->buttons;
 
     if (pressed & SCE_CTRL_UP) {
-        menu_selection = (menu_selection + 2) % 3;
+        menu_selection = (menu_selection + 3) % 4;
         menu_cooldown = 10;
     }
     if (pressed & SCE_CTRL_DOWN) {
-        menu_selection = (menu_selection + 1) % 3;
+        menu_selection = (menu_selection + 1) % 4;
         menu_cooldown = 10;
     }
     if (pressed & SCE_CTRL_LEFT && menu_selection == 1) {
@@ -555,10 +553,15 @@ void handle_menu_input(const SceCtrlData *ctrl) {
             char ps[16];
             snprintf(ps, sizeof(ps), "%d", server_port);
             ime_open("Port", ps, SCE_IME_TYPE_NUMBER, 5);
-        } else {
+        } else if (menu_selection == 2) {
             log_debug("menu: connecting to %s:%d", server_host, server_port);
             net_connect(server_host, server_port, "VitaPlayer");
             show_menu = 0;
+            menu_cooldown = 30;
+        } else if (menu_selection == 3) {
+            /* Respawn button - for testing when stuck */
+            log_debug("menu: respawn button pressed");
+            net_send_respawn();
             menu_cooldown = 30;
         }
     }
