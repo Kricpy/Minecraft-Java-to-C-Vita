@@ -483,6 +483,14 @@ void handle_respawn_input(const SceCtrlData *ctrl) {
         respawn_cooldown--;
         return;
     }
+    /* L + R = instant respawn (bypasses button selection) */
+    if ((ctrl->buttons & (SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER)) == (SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER)) {
+        log_debug("respawn: L+R pressed, instant respawn");
+        show_respawn = 0;
+        respawn_cooldown = 30;
+        net_send_respawn();
+        return;
+    }
     if (ctrl->buttons & SCE_CTRL_UP) {
         respawn_selection = 0;
         respawn_cooldown = 10;
@@ -650,42 +658,24 @@ Player player;
             continue;
         }
 
-        if (show_respawn) {
-            handle_respawn_input(&ctrl);
-            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-            draw_respawn_screen();
-            vglSwapBuffers(GL_TRUE);
-            continue;
-        }
-
-        update_status_text();
-
-        /* Count loaded chunks */
-        chunks_loaded = 0;
-        for (int cx = 0; cx < WORLD_SIZE_X; cx++)
-            for (int cz = 0; cz < WORLD_SIZE_Z; cz++)
-                if (world_chunks[cx][cz].loaded) chunks_loaded++;
-
-        /* Update player/camera FIRST so input stays responsive
-           even while chunk meshing is in progress. */
-        static SceUInt64 last_frame_time = 0;
-        SceUInt64 now_frame = sceKernelGetProcessTimeWide();
-        float frame_dt = (float)((now_frame - last_frame_time) / 1000000.0);
-        if (frame_dt <= 0.0f || frame_dt > 0.25f) frame_dt = 1.0f/60.0f;
-        last_frame_time = now_frame;
-        player_update(&player, frame_dt);
-
-        /* Detect death: if the player fell below y=0 or health hit 0,
-           show the respawn screen even if the server's Respawn packet
-           is delayed or lost.  Vanilla sends Respawn (0x35) immediately
-           on death, but with lag it can arrive after we've already
-           queued our own ClientStatus respawn. */
+        /* Detect death BEFORE the respawn screen check so the screen
+          appears on the same frame death is detected.  Placing this
+          after the check meant the respawn screen was skipped on the
+          death frame, and the player never saw the menu. */
         if (!show_respawn && (player.y < -64.0f || player.health <= 0)) {
             show_respawn = 1;
             respawn_selection = 0;
             respawn_cooldown = 0;
             log_debug("main: detected death (y=%.1f health=%d), showing respawn screen",
                       player.y, player.health);
+        }
+
+        if (show_respawn) {
+            handle_respawn_input(&ctrl);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            draw_respawn_screen();
+            vglSwapBuffers(GL_TRUE);
+            continue;
         }
 
         /* Send sneaking/sprint state changes to the server.
