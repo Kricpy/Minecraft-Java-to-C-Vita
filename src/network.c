@@ -1147,7 +1147,7 @@ static void net_dispatch_play(const uint8_t *pk, int32_t len) {
         case 0x1F: handle_keep_alive(&r); break;
         case 0x20: handle_chunk_data(&r); break;
         case 0x23: handle_join_game(&r); break;
-        case 0x2F: if (!position_look_received) handle_position_look(&r); break;
+        case 0x2F: handle_position_look(&r); break;
         case 0x46: handle_spawn_position(&r); break;
         case 0x2C: /* SPacketPlayerAbilities */
             rc_u8(&r); // flags
