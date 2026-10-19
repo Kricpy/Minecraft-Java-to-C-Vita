@@ -49,8 +49,9 @@ typedef struct {
     void *evp_enc;
     void *evp_dec;
     int teleport_id;
-        uint64_t last_pos_send;
-            int spawn_position_received;
+    uint64_t last_pos_send;
+    uint64_t last_packet_recv;
+    int spawn_position_received;
 } NetState;
 
 extern NetState g_net;
@@ -82,5 +83,6 @@ void net_send_player_action(int action);
     void net_send_block_dig(int status, int x, int y, int z, int face);
     void net_send_block_place(int x, int y, int z, int face);
     void net_send_use_entity(int entity_id, int action);
+void net_send_held_item_change(int slot);
 
 #endif

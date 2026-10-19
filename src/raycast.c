@@ -24,7 +24,7 @@ int perform_raycast(float px, float py, float pz,
             return 1;
         }
         lbx=bx; lby=by; lbz=bz;
-        d += 0.01f;
+        d += 0.05f;
     }
     return 0;
 }

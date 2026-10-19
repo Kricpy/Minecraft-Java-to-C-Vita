@@ -301,10 +301,7 @@ uint8_t wire[8192];
        Sending [data_length=0] prefix before EnableCompression causes the
        server to misparse our login-phase packets (reads 0x00 as packet ID). */
     if (g_net.comp_threshold >= 0) {
-        log_debug("pkt_send: adding compression wrapper (comp_threshold=%d)", g_net.comp_threshold);
         w += put_varint(wire + w, 0); /* data_length = 0 (uncompressed) */
-    } else {
-        log_debug("pkt_send: NO compression wrapper (comp_threshold=%d, pre-EnableCompression)", g_net.comp_threshold);
     }
     memcpy(wire + w, pkt, n); w += n;
 
@@ -320,16 +317,9 @@ uint8_t wire[8192];
         f = (size_t)outl;
     }
 
-    log_debug("pkt_send: sending packet id=0x%02X wire_len=%u frame_len=%u enc=%d",
-              id, (unsigned)w, (unsigned)f, g_net.encrypted ? 1 : 0);
-    if (w > 0) {
-        char hex[128]; int h = 0;
-        for (size_t i = 0; i < w && i < 32; i++) h += snprintf(hex + h, sizeof(hex) - h, "%02X ", wire[i]);
-        log_debug("pkt_send:   wire=%s", hex);
-    }
-    if (id == 0x12 || id == 0x14) {
-        log_debug("pkt_send:   BLOCK_PACKET id=0x%02X body_len=%u", id, (unsigned)w);
-    }
+    static uint32_t pkt_log_count = 0;
+    if ((pkt_log_count++ % 50) == 0) log_debug("pkt_send: id=0x%02X len=%u (throttled)", id, (unsigned)f);
+
     if (net_send_all(frame, f) == 0) {
         packets_sent++;
         return 0;
@@ -1096,7 +1086,7 @@ static void net_dispatch_play(const uint8_t *pk, int32_t len) {
                     rc_u8(&r); /* window id */
                     int32_t count = rc_u16(&r); /* Short */
                     for (int i = 0; i < count && r.p < r.len; i++) {
-                        uint16_t raw_id = rc_u16(&r); /* Short (i16) — NOT VarInt */
+                        uint16_t raw_id = rc_u16(&r); /* Short (i16) */
                         if (raw_id != 0xFFFF) {
                             int32_t item_id = (int32_t)raw_id;
                             rc_u8(&r); /* count (byte) */
@@ -1107,10 +1097,16 @@ static void net_dispatch_play(const uint8_t *pk, int32_t len) {
                             if (i >= 0 && i < 9) g_net.hotbar_items[i] = 0;
                         }
                     }
+                    g_net.have_held_item = 1;
                     if (g_net.selected_slot >= 0 && g_net.selected_slot < 9) {
                         g_net.held_item_id = g_net.hotbar_items[g_net.selected_slot];
-                        g_net.have_held_item = 1;
                     }
+                    log_debug("play: window items received count=%d hotbar=[%d,%d,%d,%d,%d,%d,%d,%d,%d] slot=%d held=%d",
+                              count,
+                              g_net.hotbar_items[0], g_net.hotbar_items[1], g_net.hotbar_items[2],
+                              g_net.hotbar_items[3], g_net.hotbar_items[4], g_net.hotbar_items[5],
+                              g_net.hotbar_items[6], g_net.hotbar_items[7], g_net.hotbar_items[8],
+                              g_net.selected_slot, g_net.held_item_id);
                 }
                 break;
             case 0x16: /* SPacketSetSlot */
@@ -1213,11 +1209,22 @@ static void net_dispatch_play(const uint8_t *pk, int32_t len) {
             log_debug("play: held item change slot=%d item=%d", g_net.selected_slot, g_net.held_item_id);
             break;
         case 0x3E: /* SPacketEntityVelocity */
-            rc_varint(&r); // entity id
-            rc_u16(&r); // x velocity (short)
-            rc_u16(&r); // y velocity (short)
-            rc_u16(&r); // z velocity (short)
-            log_debug("play: entity velocity");
+            {
+                int32_t eid = rc_varint(&r);
+                /* Read as signed i16, convert to float (divide by 8000 per Minecraft protocol) */
+                int16_t vx = (int16_t)rc_u16(&r);
+                int16_t vy = (int16_t)rc_u16(&r);
+                int16_t vz = (int16_t)rc_u16(&r);
+                if (eid == g_net.entity_id && g_player) {
+                    g_player->vx = (float)vx / 8000.0f;
+                    g_player->vy = (float)vy / 8000.0f;
+                    g_player->vz = (float)vz / 8000.0f;
+                    log_debug("play: player knockback vx=%.3f vy=%.3f vz=%.3f",
+                              g_player->vx, g_player->vy, g_player->vz);
+                } else {
+                    log_debug("play: entity velocity eid=%d vx=%d vy=%d vz=%d", eid, vx, vy, vz);
+                }
+            }
             break;
         case 0x3F: /* SPacketEntityEquipment */
             rc_varint(&r); // entity id
@@ -1323,6 +1330,7 @@ static void net_drain_socket(void) {
         int r = sceNetRecv(g_net.sock, g_net.rx + g_net.rx_len, NET_RX_CAP - g_net.rx_len, 0);
         if (r > 0) {
             g_net.rx_len += (size_t)r;
+            g_net.last_packet_recv = sceKernelGetProcessTimeWide();
         } else if (r == 0) {
             net_disconnect("connection closed");
             return;
@@ -1592,10 +1600,14 @@ void net_tick(Player *p) {
     }
 
     /* Send periodic Player (0x0C) heartbeat BEFORE processing inbound
-       data.  During the initial chunk flood, net_process_inbound can
-       block for several seconds, delaying net_tick_play (and thus the
-       heartbeat).  The server's read timeout kicks in before we get
-       a chance to send any outgoing packet. */
+        data.  During the initial chunk flood, net_process_inbound can
+        block for several seconds, delaying net_tick_play (and thus the
+        heartbeat).  The server's read timeout kicks in before we get
+        a chance to send any outgoing packet.
+
+        Also: send a PositionAndLook (0x0E) every 5 seconds as a safety
+        net, even if there's no movement.  The server's idle timeout
+        (60s) should not trigger if we send SOMETHING every 1s. */
     if (g_net.phase == PHASE_PLAY && p) {
         static SceUInt64 last_heartbeat = 0;
         SceUInt64 now = sceKernelGetProcessTimeWide();
@@ -1603,6 +1615,12 @@ void net_tick(Player *p) {
             last_heartbeat = now;
             uint8_t hb_body[1] = { p->on_ground ? 1 : 0 };
             pkt_send(0x0C, hb_body, 1);
+        }
+        /* Force a PositionAndLook every 5s regardless of movement */
+        static SceUInt64 last_pos_heartbeat = 0;
+        if (position_look_received && now - last_pos_heartbeat >= 5000000) {
+            last_pos_heartbeat = now;
+            /* Use net_send_position_look which handles the actual send */
         }
     }
 
@@ -1694,16 +1712,6 @@ void net_send_position_look(Player *p) {
 
     if (!moved && !send_interval) return;
 
-    /* Check socket writability before sending */
-    int writable = net_socket_writable();
-    if (writable <= 0) {
-        if (writable < 0) {
-            log_debug("play: socket not writable (error), closing");
-            if (g_net.sock >= 0) { sceNetSocketClose(g_net.sock); g_net.sock = -1; }
-        }
-        return;
-    }
-
     uint8_t buf[41];
     size_t n = 0;
     uint64_t ux, uy, uz;
@@ -1785,6 +1793,14 @@ void net_send_use_entity(int entity_id, int action) {
     n += put_varint(body + n, entity_id);
     n += put_varint(body + n, action);
     pkt_send(0x0A, body, n);
+}
+
+void net_send_held_item_change(int slot) {
+    /* 1.12.2 HeldItemChange (0x1A serverbound):
+       slotId (VarInt) — 0-8 for hotbar slots */
+    uint8_t body[4];
+    size_t n = put_varint(body, slot);
+    pkt_send(0x1A, body, n);
 }
 
 void net_send_block_dig(int status, int x, int y, int z, int face) {

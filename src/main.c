@@ -766,6 +766,33 @@ if (ctrl.buttons & SCE_CTRL_START) break;
         int cur_r = (ctrl.buttons & SCE_CTRL_RTRIGGER) ? 1 : 0;
         float cur_eye = player.is_sneaking ? CROUCH_EYE_LEVEL : STANDING_EYE_LEVEL;
 
+        /* Hotbar slot switching via D-pad left/right */
+        static int last_left = 0, last_right = 0;
+        int cur_left = (ctrl.buttons & SCE_CTRL_LEFT) ? 1 : 0;
+        int cur_right = (ctrl.buttons & SCE_CTRL_RIGHT) ? 1 : 0;
+        if (cur_left && !last_left) {
+            int new_slot = (g_net.selected_slot - 1 + 9) % 9;
+            if (new_slot != g_net.selected_slot) {
+                g_net.selected_slot = new_slot;
+                g_net.held_item_id = g_net.hotbar_items[new_slot];
+                extern void net_send_held_item_change(int slot);
+                net_send_held_item_change(new_slot);
+                log_debug("main: D-pad left, slot=%d item=%d", new_slot, g_net.held_item_id);
+            }
+        }
+        if (cur_right && !last_right) {
+            int new_slot = (g_net.selected_slot + 1) % 9;
+            if (new_slot != g_net.selected_slot) {
+                g_net.selected_slot = new_slot;
+                g_net.held_item_id = g_net.hotbar_items[new_slot];
+                extern void net_send_held_item_change(int slot);
+                net_send_held_item_change(new_slot);
+                log_debug("main: D-pad right, slot=%d item=%d", new_slot, g_net.held_item_id);
+            }
+        }
+        last_left = cur_left;
+        last_right = cur_right;
+
         /* Block breaking: send periodic Animation while holding R for visual feedback.
            Use time-based intervals (every 200ms) instead of frame-based, so animations
            are consistent regardless of frame rate (important when Vita drops frames
@@ -809,7 +836,10 @@ if (ctrl.buttons & SCE_CTRL_START) break;
                     else if (fd == FACE_LEFT)   px -= 1;
                     else if (fd == FACE_RIGHT)  px += 1;
                     net_send_block_place(px, py, pz, fd);
-                    log_debug("main: L place block at (%d,%d,%d) face=%d", px, py, pz, fd);
+                    log_debug("main: L place block at (%d,%d,%d) face=%d item=%d", px, py, pz, fd, g_net.held_item_id);
+                } else {
+                    log_debug("main: L NO block placed - have_held=%d held_item=%d slot=%d",
+                              g_net.have_held_item, g_net.held_item_id, g_net.selected_slot);
                 }
             }
         }
