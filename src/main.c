@@ -769,14 +769,14 @@ if (ctrl.buttons & SCE_CTRL_START) break;
         /* Block breaking: send periodic Animation while holding R for visual feedback */
         if (dig_active && cur_r) {
             anim_counter++;
-            if (anim_counter >= 30) { /* every ~0.5s */
+            if (anim_counter >= 20) { /* every ~0.33s at 60fps, ~0.66s at 30fps */
                 anim_counter = 0;
                 extern void net_send_animation(int hand);
                 net_send_animation(0);
             }
-            /* Auto-FINISH after break threshold (matches server-side break progress) */
+            /* Auto-FINISH after break threshold */
             SceUInt64 now = sceKernelGetProcessTimeWide();
-            if (now - dig_start_time > 1500000) { /* 1.5 seconds */
+            if (dig_start_time > 0 && now - dig_start_time >= 333333) { /* 0.33s min */
                 net_send_block_dig(2, dig_hx, dig_hy, dig_hz, dig_fd);  /* STOP_DESTROY_BLOCK */
                 dig_active = 0;
                 log_debug("main: R auto-finish dig at (%d,%d,%d)", dig_hx, dig_hy, dig_hz);
