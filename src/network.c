@@ -122,6 +122,8 @@ static int rc_string(RCUR *r, char *out, size_t out_cap) {
     return 0;
 }
 
+static void rc_skip_nbt_nested(RCUR *r);
+
 static void rc_skip_nbt(RCUR *r) {
     uint8_t type = rc_u8(r);
     if (type == 0x00) return; /* no NBT */
@@ -159,7 +161,7 @@ static void rc_skip_nbt(RCUR *r) {
                     case 0x06: for(int i=0;i<elen;i++){for(int j=0;j<8;j++) rc_u8(r);} break;
                 }
             } break;
-            case 0x0A: rc_skip_nbt(r); break; /* Compound - recurse */
+            case 0x0A: rc_skip_nbt_nested(r); break; /* Compound - recurse (no outer type byte) */
             case 0x0B: { int32_t ilen = rc_varint(r); for (int i=0;i<ilen&&r->p<r->len;i++){for(int j=0;j<4;j++) rc_u8(r);} } break; /* Int Array */
             case 0x0C: { int32_t llen = rc_varint(r); for (int i=0;i<llen&&r->p<r->len;i++){for(int j=0;j<8;j++) rc_u8(r);} } break; /* Long Array */
         }
@@ -193,7 +195,7 @@ static void rc_skip_nbt_nested(RCUR *r) {
                     case 0x06: for(int i=0;i<elen;i++){for(int j=0;j<8;j++) rc_u8(r);} break;
                 }
             } break;
-            case 0x0A: rc_skip_nbt(r); break;
+            case 0x0A: rc_skip_nbt_nested(r); break;
             case 0x0B: { int32_t ilen = rc_varint(r); for (int i=0;i<ilen&&r->p<r->len;i++){for(int j=0;j<4;j++) rc_u8(r);} } break;
             case 0x0C: { int32_t llen = rc_varint(r); for (int i=0;i<llen&&r->p<r->len;i++){for(int j=0;j<8;j++) rc_u8(r);} } break;
         }
