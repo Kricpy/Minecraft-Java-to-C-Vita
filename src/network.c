@@ -169,13 +169,11 @@ static void rc_skip_nbt(RCUR *r) {
 }
 
 static void rc_skip_nbt_nested(RCUR *r) {
-    int32_t nlen = rc_varint(r);
-    for (int i = 0; i < nlen && r->p < r->len; i++) rc_u8(r);
     while (r->p < r->len) {
         uint8_t tag_type = rc_u8(r);
-        if (tag_type == 0x00) break;
-        int32_t nlen2 = rc_varint(r);
-        for (int i = 0; i < nlen2 && r->p < r->len; i++) rc_u8(r);
+        if (tag_type == 0x00) break; /* TAG_End terminates the compound */
+        int32_t nlen = rc_varint(r);
+        for (int i = 0; i < nlen && r->p < r->len; i++) rc_u8(r);
         switch (tag_type) {
             case 0x01: rc_u8(r); break;
             case 0x02: rc_u16(r); break;
