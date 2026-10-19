@@ -119,6 +119,87 @@ static int rc_string(RCUR *r, char *out, size_t out_cap) {
     return 0;
 }
 
+static void rc_skip_nbt_recursive(RCUR *r);
+
+static void rc_skip_nbt(RCUR *r) {
+    uint8_t type = rc_u8(r);
+    if (type == 0x00) return; /* no NBT */
+    if (type != 0x0A) { /* Not a compound - shouldn't happen in slots */
+        while (r->p < r->len && rc_u8(r) != 0x00) {}
+        return;
+    }
+    /* TAG_Compound: name string, then tags until TAG_End */
+    int32_t nlen = rc_varint(r);
+    for (int i = 0; i < nlen && r->p < r->len; i++) rc_u8(r);
+    /* Read tags until TAG_End */
+    while (r->p < r->len) {
+        uint8_t tag_type = rc_u8(r);
+        if (tag_type == 0x00) break; /* END tag */
+        /* Skip name */
+        int32_t nlen2 = rc_varint(r);
+        for (int i = 0; i < nlen2 && r->p < r->len; i++) rc_u8(r);
+        /* Skip data based on type */
+        switch (tag_type) {
+            case 0x01: rc_u8(r); break;       /* Byte */
+            case 0x02: rc_u16(r); break;      /* Short */
+            case 0x03: { for (int i=0;i<4;i++) rc_u8(r); } break; /* Int */
+            case 0x04: { for (int i=0;i<8;i++) rc_u8(r); } break; /* Long */
+            case 0x05: { for (int i=0;i<4;i++) rc_u8(r); } break; /* Float */
+            case 0x06: { for (int i=0;i<8;i++) rc_u8(r); } break; /* Double */
+            case 0x07: { int32_t blen = rc_varint(r); for (int i=0;i<blen&&r->p<r->len;i++) rc_u8(r); } break; /* Byte Array */
+            case 0x08: { int32_t slen = rc_varint(r); for (int i=0;i<slen&&r->p<r->len;i++) rc_u8(r); } break; /* String */
+            case 0x09: { uint8_t etype = rc_u8(r); int32_t elen = rc_varint(r); 
+                /* Simplified: skip based on element type size */
+                switch (etype) {
+                    case 0x01: for(int i=0;i<elen;i++) rc_u8(r); break;
+                    case 0x02: for(int i=0;i<elen;i++) rc_u16(r); break;
+                    case 0x03: for(int i=0;i<elen;i++){for(int j=0;j<4;j++) rc_u8(r);} break;
+                    case 0x04: for(int i=0;i<elen;i++){for(int j=0;j<8;j++) rc_u8(r);} break;
+                    case 0x05: for(int i=0;i<elen;i++){for(int j=0;j<4;j++) rc_u8(r);} break;
+                    case 0x06: for(int i=0;i<elen;i++){for(int j=0;j<8;j++) rc_u8(r);} break;
+                }
+            } break;
+            case 0x0A: rc_skip_nbt_recursive(r); break; /* Compound */
+            case 0x0B: { int32_t ilen = rc_varint(r); for (int i=0;i<ilen&&r->p<r->len;i++){for(int j=0;j<4;j++) rc_u8(r);} } break; /* Int Array */
+            case 0x0C: { int32_t llen = rc_varint(r); for (int i=0;i<llen&&r->p<r->len;i++){for(int j=0;j<8;j++) rc_u8(r);} } break; /* Long Array */
+        }
+    }
+}
+
+static void rc_skip_nbt_recursive(RCUR *r) {
+    int32_t nlen = rc_varint(r);
+    for (int i = 0; i < nlen && r->p < r->len; i++) rc_u8(r);
+    while (r->p < r->len) {
+        uint8_t tag_type = rc_u8(r);
+        if (tag_type == 0x00) break;
+        int32_t nlen2 = rc_varint(r);
+        for (int i = 0; i < nlen2 && r->p < r->len; i++) rc_u8(r);
+        switch (tag_type) {
+            case 0x01: rc_u8(r); break;
+            case 0x02: rc_u16(r); break;
+            case 0x03: { for (int i=0;i<4;i++) rc_u8(r); } break;
+            case 0x04: { for (int i=0;i<8;i++) rc_u8(r); } break;
+            case 0x05: { for (int i=0;i<4;i++) rc_u8(r); } break;
+            case 0x06: { for (int i=0;i<8;i++) rc_u8(r); } break;
+            case 0x07: { int32_t blen = rc_varint(r); for (int i=0;i<blen&&r->p<r->len;i++) rc_u8(r); } break;
+            case 0x08: { int32_t slen = rc_varint(r); for (int i=0;i<slen&&r->p<r->len;i++) rc_u8(r); } break;
+            case 0x09: { uint8_t etype = rc_u8(r); int32_t elen = rc_varint(r);
+                switch (etype) {
+                    case 0x01: for(int i=0;i<elen;i++) rc_u8(r); break;
+                    case 0x02: for(int i=0;i<elen;i++) rc_u16(r); break;
+                    case 0x03: for(int i=0;i<elen;i++){for(int j=0;j<4;j++) rc_u8(r);} break;
+                    case 0x04: for(int i=0;i<elen;i++){for(int j=0;j<8;j++) rc_u8(r);} break;
+                    case 0x05: for(int i=0;i<elen;i++){for(int j=0;j<4;j++) rc_u8(r);} break;
+                    case 0x06: for(int i=0;i<elen;i++){for(int j=0;j<8;j++) rc_u8(r);} break;
+                }
+            } break;
+            case 0x0A: rc_skip_nbt_recursive(r); break;
+            case 0x0B: { int32_t ilen = rc_varint(r); for (int i=0;i<ilen&&r->p<r->len;i++){for(int j=0;j<4;j++) rc_u8(r);} } break;
+            case 0x0C: { int32_t llen = rc_varint(r); for (int i=0;i<llen&&r->p<r->len;i++){for(int j=0;j<8;j++) rc_u8(r);} } break;
+        }
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* Logging                                                             */
 /* ------------------------------------------------------------------ */
@@ -999,9 +1080,15 @@ static void net_dispatch_play(const uint8_t *pk, int32_t len) {
     switch (id) {
             case 0x0B: /* SPacketBlockChange */
                 {
-                    int32_t bx = (int32_t)rc_u32(&r);
-                    int32_t by = (int32_t)rc_u8(&r);
-                    int32_t bz = (int32_t)rc_u32(&r);
+                    uint64_t packed = rc_u64(&r);
+                    int32_t bx = (int32_t)((packed >> 38) & 0x3FFFFFFULL);
+                    int32_t by = (int32_t)((packed >> 26) & 0xFFF);
+                    int32_t bz = (int32_t)((packed << 38) >> 38);
+                    /* Sign-extend x and z (26-bit signed) */
+                    if (bx >= 0x2000000) bx -= 0x4000000;
+                    if (bz >= 0x2000000) bz -= 0x4000000;
+                    /* y is 12-bit signed */
+                    if (by >= 0x800) by -= 0x1000;
                     int32_t bid = rc_varint(&r);
                     extern void chunk_set_block(int x, int y, int z, uint16_t packed);
                     chunk_set_block(bx, by, bz, (uint16_t)((bid << 4) | 0));
@@ -1010,40 +1097,46 @@ static void net_dispatch_play(const uint8_t *pk, int32_t len) {
             case 0x14: /* SPacketWindowItems */
                 {
                     rc_u8(&r); /* window id */
-                    int32_t count = rc_varint(&r);
-                    for (int i = 0; i < count; i++) {
-                        /* Parse Slot: Present(byte) + ItemID(varint) + Count(byte) + Damage(short) + NBT */
+                    int32_t count = rc_u16(&r); /* Short */
+                    for (int i = 0; i < count && r.p < r.len; i++) {
                         uint8_t present = rc_u8(&r);
                         if (present) {
                             int32_t item_id = rc_varint(&r);
-                            rc_u8(&r); /* count */
-                            rc_u16(&r); /* damage */
-                            uint8_t nbt = rc_u8(&r);
-                            if (nbt) {
-                                /* Skip NBT compound: read string name + tags until 0x00 */
-                            }
+                            rc_u8(&r); /* count (byte) */
+                            rc_u16(&r); /* damage (short) */
+                            rc_skip_nbt(&r);
+                            if (i >= 0 && i < 9) g_net.hotbar_items[i] = item_id;
                         }
+                    }
+                    if (g_net.selected_slot >= 0 && g_net.selected_slot < 9) {
+                        g_net.held_item_id = g_net.hotbar_items[g_net.selected_slot];
+                        g_net.have_held_item = 1;
                     }
                 }
                 break;
-            case 0x16: /* SPacketSetSlot */
+             case 0x16: /* SPacketSetSlot */
                 {
                     rc_u8(&r); /* window id */
-                    int32_t slot = rc_varint(&r);
+                    int32_t slot = rc_u16(&r); /* Short */
                     uint8_t present = rc_u8(&r);
                     if (present) {
                         int32_t item_id = rc_varint(&r);
+                        rc_u8(&r); /* count (byte) */
+                        rc_u16(&r); /* damage (short) */
+                        rc_skip_nbt(&r);
                         if (slot >= 0 && slot < 9) {
-                            g_net.held_item_id = item_id;
+                            g_net.hotbar_items[slot] = item_id;
+                            if (slot == g_net.selected_slot) {
+                                g_net.held_item_id = item_id;
+                                g_net.have_held_item = 1;
+                            }
+                        }
+                    } else if (slot >= 0 && slot < 9) {
+                        g_net.hotbar_items[slot] = 0;
+                        if (slot == g_net.selected_slot) {
+                            g_net.held_item_id = 0;
                             g_net.have_held_item = 1;
                         }
-                        rc_u8(&r); /* count */
-                        rc_u16(&r); /* damage */
-                        uint8_t nbt = rc_u8(&r);
-                        (void)nbt;
-                    } else if (slot >= 0 && slot < 9) {
-                        g_net.held_item_id = 0;
-                        g_net.have_held_item = 1;
                     }
                 }
                 break;
@@ -1113,8 +1206,12 @@ static void net_dispatch_play(const uint8_t *pk, int32_t len) {
             log_debug("play: entity teleport");
             break;
         case 0x3A: /* SPacketHeldItemChange */
-            rc_u8(&r); // slot
-            log_debug("play: held item change");
+            g_net.selected_slot = rc_u8(&r); // slot
+            if (g_net.selected_slot >= 0 && g_net.selected_slot < 9) {
+                g_net.held_item_id = g_net.hotbar_items[g_net.selected_slot];
+                g_net.have_held_item = 1;
+            }
+            log_debug("play: held item change slot=%d item=%d", g_net.selected_slot, g_net.held_item_id);
             break;
         case 0x3E: /* SPacketEntityVelocity */
             rc_varint(&r); // entity id

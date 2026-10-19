@@ -30,6 +30,8 @@ typedef struct {
     int gamemode;
     int held_item_id;
     int have_held_item;
+    int selected_slot;
+    int hotbar_items[9];
     double spawn_x, spawn_y, spawn_z;
     float spawn_yaw, spawn_pitch;
     double pos_x, pos_y, pos_z;
