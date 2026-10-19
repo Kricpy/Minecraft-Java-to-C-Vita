@@ -760,9 +760,28 @@ if (ctrl.buttons & SCE_CTRL_START) break;
         /* Block interaction: L = place/interact, R = break/dig */
         static int last_l = 0, last_r = 0;
         static int dig_hx=0, dig_hy=0, dig_hz=0, dig_fd=0, dig_active=0;
+        static SceUInt64 dig_start_time = 0;
+        static int anim_counter = 0;
         int cur_l = (ctrl.buttons & SCE_CTRL_LTRIGGER) ? 1 : 0;
         int cur_r = (ctrl.buttons & SCE_CTRL_RTRIGGER) ? 1 : 0;
         float cur_eye = player.is_sneaking ? CROUCH_EYE_LEVEL : STANDING_EYE_LEVEL;
+
+        /* Block breaking: send periodic Animation while holding R for visual feedback */
+        if (dig_active && cur_r) {
+            anim_counter++;
+            if (anim_counter >= 30) { /* every ~0.5s */
+                anim_counter = 0;
+                extern void net_send_animation(int hand);
+                net_send_animation(0);
+            }
+            /* Auto-FINISH after break threshold (matches server-side break progress) */
+            SceUInt64 now = sceKernelGetProcessTimeWide();
+            if (now - dig_start_time > 1500000) { /* 1.5 seconds */
+                net_send_block_dig(2, dig_hx, dig_hy, dig_hz, dig_fd);  /* STOP_DESTROY_BLOCK */
+                dig_active = 0;
+                log_debug("main: R auto-finish dig at (%d,%d,%d)", dig_hx, dig_hy, dig_hz);
+            }
+        }
 
         if (cur_l && !last_l) {
             /* Raycast to find target block for placing */
@@ -809,6 +828,8 @@ if (ctrl.buttons & SCE_CTRL_START) break;
                 net_send_block_dig(0, hx, hy, hz, fd);  /* START_DESTROY_BLOCK */
                 dig_hx = hx; dig_hy = hy; dig_hz = hz; dig_fd = fd;
                 dig_active = 1;
+                dig_start_time = sceKernelGetProcessTimeWide();
+                anim_counter = 0;
                 log_debug("main: R start dig block at (%d,%d,%d) face=%d", hx, hy, hz, fd);
             } else {
                 /* No block hit — attack nearest entity or punch air */
@@ -819,12 +840,12 @@ if (ctrl.buttons & SCE_CTRL_START) break;
         }
 
         if (!cur_r && last_r && dig_active) {
-            /* Finish digging on release — server validates break time.
-               Quick tap won't break (server rejects insufficient damage),
-               holding R breaks the block. Must send original position + face. */
-            net_send_block_dig(2, dig_hx, dig_hy, dig_hz, dig_fd);  /* STOP_DESTROY_BLOCK */
+            /* Cancel digging on early release (before auto-finish timer).
+               This prevents quick-tap from breaking blocks.
+               If timer already fired FINISH, dig_active=0 so this won't run. */
+            net_send_block_dig(1, dig_hx, dig_hy, dig_hz, dig_fd);  /* ABORT_DESTROY_BLOCK */
             dig_active = 0;
-            log_debug("main: R finish dig at (%d,%d,%d)", dig_hx, dig_hy, dig_hz);
+            log_debug("main: R cancel dig at (%d,%d,%d)", dig_hx, dig_hy, dig_hz);
         }
 
         last_l = cur_l;

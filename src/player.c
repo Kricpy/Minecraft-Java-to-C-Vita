@@ -142,7 +142,7 @@ static void physics_tick(Player *p, float kf, float ks, int sneak,
                         high_y = mid;
                 }
                 // Snap to block surface (top of block feet touched)
-                p->y = (float)((int)floorf(high_y - 0.001f)) + 1.0f;
+                p->y = ceilf(high_y - 0.001f);
                 p->vy = 0.0f;
                 p->on_ground = 1;
                 just_landed = 1;
