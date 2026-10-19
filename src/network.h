@@ -79,5 +79,6 @@ void net_send_player_action(int action);
     void net_send_animation(int hand);
     void net_send_block_dig(int status, int x, int y, int z, int face);
     void net_send_block_place(int x, int y, int z, int face);
+    void net_send_use_entity(int entity_id, int action);
 
 #endif

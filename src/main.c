@@ -23,6 +23,7 @@ void net_send_position_look(Player *p);
 void net_send_player_action(int state);
 void net_send_block_dig(int status, int x, int y, int z, int face);
 void net_send_block_place(int x, int y, int z, int face);
+void net_send_use_entity(int entity_id, int action);
 
 #define LOG_MAX_LINES 6
 #define LOG_LINE_LEN  128
@@ -758,6 +759,7 @@ if (ctrl.buttons & SCE_CTRL_START) break;
 
         /* Block interaction: L = place/interact, R = break/dig */
         static int last_l = 0, last_r = 0;
+        static int dig_hx=0, dig_hy=0, dig_hz=0, dig_fd=0, dig_active=0;
         int cur_l = (ctrl.buttons & SCE_CTRL_LTRIGGER) ? 1 : 0;
         int cur_r = (ctrl.buttons & SCE_CTRL_RTRIGGER) ? 1 : 0;
         float cur_eye = player.is_sneaking ? CROUCH_EYE_LEVEL : STANDING_EYE_LEVEL;
@@ -805,16 +807,24 @@ if (ctrl.buttons & SCE_CTRL_START) break;
                 extern void net_send_animation(int hand);
                 net_send_animation(0);
                 net_send_block_dig(0, hx, hy, hz, fd);  /* START_DESTROY_BLOCK */
+                dig_hx = hx; dig_hy = hy; dig_hz = hz; dig_fd = fd;
+                dig_active = 1;
                 log_debug("main: R start dig block at (%d,%d,%d) face=%d", hx, hy, hz, fd);
+            } else {
+                /* No block hit — attack nearest entity or punch air */
+                extern void net_send_animation(int hand);
+                net_send_animation(0);
+                log_debug("main: R punch (no block target)");
             }
         }
 
-        if (!cur_r && last_r) {
+        if (!cur_r && last_r && dig_active) {
             /* Finish digging on release — server validates break time.
                Quick tap won't break (server rejects insufficient damage),
-               holding R breaks the block. */
-            net_send_block_dig(2, 0, 0, 0, 0);  /* STOP_DESTROY_BLOCK (FINISH) */
-            log_debug("main: R finish dig");
+               holding R breaks the block. Must send original position + face. */
+            net_send_block_dig(2, dig_hx, dig_hy, dig_hz, dig_fd);  /* STOP_DESTROY_BLOCK */
+            dig_active = 0;
+            log_debug("main: R finish dig at (%d,%d,%d)", dig_hx, dig_hy, dig_hz);
         }
 
         last_l = cur_l;

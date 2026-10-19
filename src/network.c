@@ -1681,6 +1681,16 @@ void net_send_animation(int hand) {
     pkt_send(0x1D, body, 1);
 }
 
+void net_send_use_entity(int entity_id, int action) {
+    /* 1.12.2 Use Entity (0x0A serverbound):
+       entity_id (VarInt), action (VarInt Enum): 0=INTERACT, 1=ATTACK, 2.INTERACT_AT */
+    uint8_t body[16];
+    size_t n = 0;
+    n += put_varint(body + n, entity_id);
+    n += put_varint(body + n, action);
+    pkt_send(0x0A, body, n);
+}
+
 void net_send_block_dig(int status, int x, int y, int z, int face) {
     /* 1.12.2 PlayerDigging (0x14):
        action (varint): 0=START_DESTROY_BLOCK, 1=ABORT_DESTROY_BLOCK, 2=STOP_DESTROY_BLOCK,
