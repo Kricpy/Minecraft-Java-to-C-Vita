@@ -769,14 +769,15 @@ if (ctrl.buttons & SCE_CTRL_START) break;
         /* Block breaking: send periodic Animation while holding R for visual feedback */
         if (dig_active && cur_r) {
             anim_counter++;
-            if (anim_counter >= 20) { /* every ~0.33s at 60fps, ~0.66s at 30fps */
+            if (anim_counter >= 10) { /* every ~0.17s at 60fps, ~0.33s at 30fps */
                 anim_counter = 0;
                 extern void net_send_animation(int hand);
                 net_send_animation(0);
             }
-            /* Auto-FINISH after break threshold */
+            /* Auto-FINISH after break threshold — vanilla break time for stone
+               with fist is ~2.25s, but server may not validate time */
             SceUInt64 now = sceKernelGetProcessTimeWide();
-            if (dig_start_time > 0 && now - dig_start_time >= 333333) { /* 0.33s min */
+            if (dig_start_time > 0 && now - dig_start_time >= 1000000) { /* 1.0 second */
                 net_send_block_dig(2, dig_hx, dig_hy, dig_hz, dig_fd);  /* STOP_DESTROY_BLOCK */
                 dig_active = 0;
                 log_debug("main: R auto-finish dig at (%d,%d,%d)", dig_hx, dig_hy, dig_hz);
