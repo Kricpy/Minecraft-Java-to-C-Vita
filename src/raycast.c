@@ -8,9 +8,9 @@ int perform_raycast(float px, float py, float pz,
     float d = 0.0f;
     int lbx=-1, lby=-1, lbz=-1;
     while (d < MINECRAFT_SURVIVAL_REACH) {
-        int bx=(int)(px+dx*d);
-        int by=(int)(py+dy*d);
-        int bz=(int)(pz+dz*d);
+        int bx=(int)floorf(px+dx*d);
+        int by=(int)floorf(py+dy*d);
+        int bz=(int)floorf(pz+dz*d);
         if (by >= 0 && by < CHUNK_SIZE_Z && chunk_is_solid(bx, by, bz)) {
             *hx=bx; *hy=by; *hz=bz;
             if (lbx != -1) {

@@ -64,11 +64,17 @@ double   rc_f64(RCUR *r);
 int32_t  rc_varint(RCUR *r);
 
 void log_init_once(void);
-void log_debug(const char *fmt, ...);
-void log_get_lines(char lines[6][128], int *count);
-int  net_init(void);
-int  net_connect(const char *host, int port, const char *username);
-void net_tick(Player *p);
-void net_disconnect(const char *reason);
+    void log_debug(const char *fmt, ...);
+    void log_get_lines(char lines[6][128], int *count);
+    int  net_init(void);
+    int  net_connect(const char *host, int port, const char *username);
+    void net_tick(Player *p);
+    void net_disconnect(const char *reason);
+void net_send_chat(const char *msg);
+void net_send_respawn(void);
+void net_send_position_look(Player *p);
+void net_send_player_action(int action);
+    void net_send_block_dig(int status, int x, int y, int z, int face);
+    void net_send_block_place(int x, int y, int z, int face);
 
 #endif

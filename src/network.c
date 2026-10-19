@@ -36,6 +36,7 @@ static uint32_t frame_counter = 0;
 static SceUInt64 keepalive_send_time = 0;
 SceUInt64 last_position_look_time = 0;
 int position_look_received = 0;
+int last_confirmed_tid = -1;
 
 /* ------------------------------------------------------------------ */
 /* Protocol readers                                                    */
@@ -131,8 +132,9 @@ void log_debug(const char *fmt, ...) {
     char buf[128]; vsnprintf(buf, sizeof(buf), fmt, ap); va_end(ap);
     SceDateTime t; sceRtcGetCurrentClockLocalTime(&t);
     printf("[%02d:%02d:%02d] %s\n", t.hour, t.minute, t.second, buf);
-    FILE *f = fopen("ux0:data/minecraft_javac.log", "a");
-    if(f) { fprintf(f, "[%02d:%02d:%02d] %s\n", t.hour, t.minute, t.second, buf); fclose(f); }
+    static FILE *log_f = NULL;
+    if (!log_f) log_f = fopen("ux0:data/minecraft_javac.log", "a");
+    if(log_f) { fprintf(log_f, "[%02d:%02d:%02d] %s\n", t.hour, t.minute, t.second, buf); fflush(log_f); }
     if(log_count < 6) { strncpy(log_lines[log_count++], buf, 128); }
     else { for(int i=0;i<5;i++) strcpy(log_lines[i], log_lines[i+1]); strncpy(log_lines[5], buf, 128); }
 }
@@ -149,32 +151,57 @@ static int send_err_retry(int ret) {
     if (ret >= 0) return 0;
     int kerr = *sceNetErrnoLoc();
     uint32_t uerr = (uint32_t)(-ret);
-    if (kerr == 11 || kerr == 35 || kerr == 36 || kerr == 57 || kerr == 119 ||
+    if (kerr == 11 || kerr == 32 || kerr == 35 || kerr == 36 || kerr == 57 || kerr == 119 ||
         uerr == 0x80410123u || uerr == 0x80410124u)
         return 1;
     return 0;
 }
 
 static int net_send_all(const uint8_t *buf, size_t len) {
-    size_t off = 0;
+    if (g_net.sock < 0) {
+        static int sock_log = 0;
+        if ((sock_log++ % 20) == 0) log_debug("net_send_all: sock < 0, cannot send len=%u", (unsigned)len);
+        return -1;
+    }
+    int nonblock = 1;
+    sceNetSetsockopt(g_net.sock, SOL_SOCKET, SO_NONBLOCK, &nonblock, sizeof(nonblock));
     uint32_t tries = 0;
-    while (off < len) {
-        int s = sceNetSend(g_net.sock, buf + off, len - off, 0);
-        if (s < 0) {
-            if (send_err_retry(s)) {
-                if (++tries > 200) {
-                    log_debug("net_send_all: max retries exceeded");
-                    return -1;
-                }
-                continue;
+    while (tries < 100) {
+        int s = sceNetSend(g_net.sock, buf, len, 0);
+        if (s >= 0) {
+            if ((size_t)s >= len) {
+                static int send_ok_log = 0;
+                if ((send_ok_log++ % 20) == 0) log_debug("net_send_all: OK sent=%u len=%u", (unsigned)s, (unsigned)len);
+                return 0;
             }
-            log_debug("net_send_all: fatal ret=%d kerr=%d", s, *sceNetErrnoLoc());
+            buf += s;
+            len -= (size_t)s;
+            tries = 0;
+            continue;
+        }
+        int kerr = *sceNetErrnoLoc();
+        /* EPIPE(32) and ECONNRESET(35) mean the connection is dead — do not retry.
+           Only transient errors (EAGAIN, EINPROGRESS, ENOBUFS, etc.) are retried briefly. */
+        if (kerr == 32 || kerr == 35) {
+            log_debug("net_send_all: fatal kerr=%d, closing socket", kerr);
+            if (g_net.sock >= 0) { sceNetSocketClose(g_net.sock); g_net.sock = -1; }
             return -1;
         }
-        off += (size_t)s;
-        tries = 0;
+        if (kerr == 11 || kerr == 36 || kerr == 57 || kerr == 119 ||
+            (uint32_t)(-s) == 0x80410123u || (uint32_t)(-s) == 0x80410124u || (uint32_t)(-s) == 0x80410125u ||
+            (uint32_t)(-s) == 0x80410136u || (uint32_t)(-s) == 0x80410137u || (uint32_t)(-s) == 0x80410135u) {
+            tries++;
+            if ((tries % 20) == 0) log_debug("net_send_all: retry kerr=%d tries=%d len=%u", kerr, tries, (unsigned)len);
+            sceKernelDelayThread(10000); /* 10ms delay between retries */
+            continue;
+        }
+        static int send_err_log = 0;
+        if ((send_err_log++ % 5) == 0) log_debug("net_send_all: fatal ret=%d kerr=%d len=%u sock=%d", s, kerr, (unsigned)len, g_net.sock);
+        return -1;
     }
-    return 0;
+    log_debug("net_send_all: max retries (100) exceeded len=%u, closing socket", (unsigned)len);
+    if (g_net.sock >= 0) { sceNetSocketClose(g_net.sock); g_net.sock = -1; }
+    return -1;
 }
 
 /* Frame + encrypt + send one packet (id + body) */
@@ -186,22 +213,19 @@ static int pkt_send(uint8_t id, const uint8_t *body, size_t body_len) {
     if (body_len) memcpy(pkt + n, body, body_len);
     n += body_len;
 
-    uint8_t wire[8192];
+uint8_t wire[8192];
     size_t w = 0;
-    if (g_net.comp_threshold >= 0 && n > (size_t)g_net.comp_threshold) {
-        /* Compressed packet: [data_length_varint][uncompressed_length_varint][compressed_data] */
-        /* We don't have zlib in the client, so always send uncompressed.
-           The 0x00 prefix tells the server "this is not compressed". */
-        wire[w++] = 0; /* uncompressed */
-        memcpy(wire + w, pkt, n); w += n;
+    /* Compression wrapper only valid AFTER server sends EnableCompression.
+       Before that, send raw [packet_id][body] per vanilla 1.12.2 behavior.
+       Sending [data_length=0] prefix before EnableCompression causes the
+       server to misparse our login-phase packets (reads 0x00 as packet ID). */
+    if (g_net.comp_threshold >= 0) {
+        log_debug("pkt_send: adding compression wrapper (comp_threshold=%d)", g_net.comp_threshold);
+        w += put_varint(wire + w, 0); /* data_length = 0 (uncompressed) */
     } else {
-        /* Small packet: still needs the 0x00 prefix!
-           Without it, the server reads the packet ID as the data_length
-           varint, thinks the packet is compressed, and rejects it with
-           "size of N is below server threshold of 256". */
-        wire[w++] = 0; /* uncompressed */
-        memcpy(wire + w, pkt, n); w += n;
+        log_debug("pkt_send: NO compression wrapper (comp_threshold=%d, pre-EnableCompression)", g_net.comp_threshold);
     }
+    memcpy(wire + w, pkt, n); w += n;
 
     uint8_t frame[8192];
     size_t f = put_varint(frame, (int32_t)w);
@@ -215,25 +239,22 @@ static int pkt_send(uint8_t id, const uint8_t *body, size_t body_len) {
         f = (size_t)outl;
     }
 
-    log_debug("pkt_send: sending packet id=0x%02X len=%u", id, (unsigned)f);
-    /* Special handling for Confirm Teleport (0x00) and Position (0x0E) - retry on failure */
-    int max_retries = (id == 0x00 || id == 0x0E) ? 3 : 1;
-    int result = -1;
-    for (int attempt = 0; attempt < max_retries; attempt++) {
-        if (attempt > 0) {
-            sceKernelDelayThread(2000); /* 2ms delay between retries */
-        }
-        if (net_send_all(frame, f) == 0) {
-            result = 0;
-            break;
-        }
+    log_debug("pkt_send: sending packet id=0x%02X wire_len=%u frame_len=%u enc=%d",
+              id, (unsigned)w, (unsigned)f, g_net.encrypted ? 1 : 0);
+    if (w > 0) {
+        char hex[128]; int h = 0;
+        for (size_t i = 0; i < w && i < 32; i++) h += snprintf(hex + h, sizeof(hex) - h, "%02X ", wire[i]);
+        log_debug("pkt_send:   wire=%s", hex);
     }
-    if (result == 0) {
+    if (id == 0x12 || id == 0x14) {
+        log_debug("pkt_send:   BLOCK_PACKET id=0x%02X body_len=%u", id, (unsigned)w);
+    }
+    if (net_send_all(frame, f) == 0) {
         packets_sent++;
-    } else {
-        log_debug("pkt_send: packet id=0x%02X failed to send after %d attempts", id, max_retries);
+        return 0;
     }
-    return result;
+    log_debug("pkt_send: packet id=0x%02X failed to send", id);
+    return -1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -319,8 +340,6 @@ int net_connect(const char *host, int port, const char *username) {
     }
     log_debug("net_connect: resolved %s -> %08X", host, resolved.s_addr);
     int sock = sceNetSocket("net_sock", SCE_NET_AF_INET, SCE_NET_SOCK_STREAM, 0);
-    int nonblock = 1;
-    sceNetSetsockopt(sock, SOL_SOCKET, SO_NONBLOCK, &nonblock, sizeof(nonblock));
     SceNetSockaddrIn addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_len = sizeof(addr);
@@ -335,6 +354,11 @@ int net_connect(const char *host, int port, const char *username) {
         sceNetSocketClose(sock);
         return -1;
     }
+    /* Set TCP_NODELAY to disable Nagle's algorithm for responsive small packets */
+    int nodelay = 1;
+    sceNetSetsockopt(sock, 6, 1, &nodelay, sizeof(nodelay)); /* IPPROTO_TCP=6, TCP_NODELAY=1 */
+    int nonblock = 1;
+    sceNetSetsockopt(sock, SOL_SOCKET, SO_NONBLOCK, &nonblock, sizeof(nonblock));
     g_net.sock = sock;
     g_net.phase = PHASE_CONNECTING;
     g_net.rx_len = 0;
@@ -429,9 +453,28 @@ static void extract_chat_text(const char *json, char *out, size_t cap) {
 
 static void handle_keep_alive(RCUR *r) {
     uint64_t id = rc_u64(r);
+    static uint64_t seen_ids[8];
+    static int seen_count = 0;
+    for (int i = 0; i < seen_count; i++) {
+        if (seen_ids[i] == id) {
+            log_debug("play: keepalive id=%llu already sent, dedup (slot %d)",
+                      (unsigned long long)id, i);
+            return;
+        }
+    }
+    if (seen_count < 8) seen_ids[seen_count++] = id;
+    else {
+        /* Ring buffer: shift out oldest, append newest */
+        memmove(seen_ids, seen_ids + 1, sizeof(uint64_t) * 7);
+        seen_ids[7] = id;
+    }
     uint8_t body[8];
     for (int i = 0; i < 8; i++) body[i] = (uint8_t)(id >> (8 * (7 - i)));
     keepalive_send_time = sceKernelGetProcessTimeWide();
+    log_debug("play: received KeepAlive (0x1F) id=%llu, responding with 0x0B",
+              (unsigned long long)id);
+    log_debug("play: keepalive bytes: %02X %02X %02X %02X %02X %02X %02X %02X",
+              body[0], body[1], body[2], body[3], body[4], body[5], body[6], body[7]);
     pkt_send(0x0B, body, 8);
 }
 
@@ -478,6 +521,14 @@ static void handle_join_game(RCUR *r) {
     } else {
         /* For respawns, keep position but reset timer */
         last_position_look_time = sceKernelGetProcessTimeWide();
+    }
+    /* Reset teleport confirm tracking on join/respawn — server starts teleportId at 0 */
+    {
+        static int last_join_eid = -999;
+        if ((int)g_net.entity_id != last_join_eid) {
+            last_confirmed_tid = -1;
+            last_join_eid = (int)g_net.entity_id;
+        }
     }
 
     /* CPacketClientSettings: lang(<=16), view, chat vis, colors, model parts, main hand */
@@ -528,18 +579,18 @@ static void handle_position_look(RCUR *r) {
         return;
     }
 
-    /* SEND CONFIRM TELEPORT IMMEDIATELY - before any other processing */
+    if ((int)tid <= last_confirmed_tid) {
+        log_debug("play: skipping teleport confirm tid=%d (last=%d, not advancing)", (int)tid, last_confirmed_tid);
+        return;
+    }
+    last_confirmed_tid = (int)tid;
+
     uint8_t body[8];
     size_t n = put_varint(body, tid);
-    log_debug("play: sending Confirm Teleport immediately (tid=%d)", tid);
+    log_debug("play: sending Confirm Teleport (tid=%d)", tid);
     int send_result = pkt_send(0x00, body, n);
     if (send_result != 0) {
-        log_debug("play: WARNING - Confirm Teleport send failed, retrying once...");
-        sceKernelDelayThread(1000); /* 1ms delay */
-        send_result = pkt_send(0x00, body, n);
-        if (send_result != 0) {
-            log_debug("play: CRITICAL - Confirm Teleport send failed permanently!");
-        }
+        log_debug("play: Confirm Teleport send failed (tid=%d), no retry", tid);
     }
     log_debug("play: Confirm Teleport sent for tid=%d", tid);
 
@@ -759,6 +810,14 @@ static void handle_spawn_position(RCUR *r) {
     g_net.have_spawn = 1;
     g_net.spawn_position_received = 1;
     log_debug("play: Spawn Position packet (0x46) received: %d %d %d -> origin (%d,%d)", x, y, z, g_net.origin_cx, g_net.origin_cz);
+
+    /* Send Client Status (0x03) with action=0 (PERFORM_RESPAWN) to tell
+       the server we're ready to play.  Without this, some servers keep
+       the player in a "loading" state and eventually time out. */
+    if (g_net.phase == PHASE_PLAY) {
+        uint8_t cs_body[1] = { 0 };  /* action 0 = PERFORM_RESPAWN */
+        pkt_send(0x03, cs_body, 1);
+    }
 }
 
 static void handle_chunk_data(RCUR *r) {
@@ -855,8 +914,6 @@ static void handle_chunk_data(RCUR *r) {
     ix = cx - g_net.origin_cx + WORLD_SIZE_X / 2;
     iz = cz - g_net.origin_cz + WORLD_SIZE_Z / 2;
     if (ix >= 0 && ix < WORLD_SIZE_X && iz >= 0 && iz < WORLD_SIZE_Z) {
-        log_debug("chunk data (%d,%d) full=%d mask=%04X vtx=%d",
-                  cx, cz, full, mask, world_chunks[ix][iz].vertex_count);
         if (world_chunks[ix][iz].loaded && world_chunks[ix][iz].dirty) {
             chunk_rebuild_mesh(&world_chunks[ix][iz]);
         }
@@ -925,13 +982,6 @@ static void handle_respawn(RCUR *r) {
     extern void clear_all_chunks(void);
     clear_all_chunks();
     log_debug("respawn: cleared all chunks");
-
-    /* Clear all chunks so the server's new chunk stream starts fresh.
-       Leaving stale chunks loaded causes OOB writes when the server
-       sends new chunks at the respawn position with different offsets. */
-    extern void clear_all_chunks(void);
-    clear_all_chunks();
-    log_debug("respawn: cleared all chunks");
 }
 
 static void handle_disconnect(const char *stage, RCUR *r) {
@@ -946,8 +996,18 @@ static void handle_disconnect(const char *stage, RCUR *r) {
 static void net_dispatch_play(const uint8_t *pk, int32_t len) {
     RCUR r = { pk, (size_t)len, 0 };
     int32_t id = rc_varint(&r);
-    log_debug("net: parsed play id=0x%02X, remaining=%u", id, (unsigned)(r.len - r.p));
     switch (id) {
+        case 0x0B: /* SPacketBlockChange */
+            {
+                int32_t bx = (int32_t)rc_u32(&r);
+                int32_t by = (int32_t)rc_u8(&r);
+                int32_t bz = (int32_t)rc_u32(&r);
+                int32_t bid = rc_varint(&r);
+                extern void chunk_set_block(int x, int y, int z, uint16_t packed);
+                chunk_set_block(bx, by, bz, (uint16_t)((bid << 4) | 0));
+                log_debug("play: BlockChange (%d,%d,%d) id=%d", bx, by, bz, bid);
+            }
+            break;
         case 0x35: handle_respawn(&r); break;
         case 0x0F: handle_chat(&r); break;
         case 0x1A: handle_disconnect("play", &r); break;
@@ -955,7 +1015,7 @@ static void net_dispatch_play(const uint8_t *pk, int32_t len) {
         case 0x1F: handle_keep_alive(&r); break;
         case 0x20: handle_chunk_data(&r); break;
         case 0x23: handle_join_game(&r); break;
-        case 0x2F: handle_position_look(&r); break;
+        case 0x2F: if (!position_look_received) handle_position_look(&r); break;
         case 0x46: handle_spawn_position(&r); break;
         case 0x2C: /* SPacketPlayerAbilities */
             rc_u8(&r); // flags
@@ -1123,8 +1183,7 @@ static void net_dispatch_login(const uint8_t *pk, int32_t len) {
 /* Receive path                                                        */
 /* ------------------------------------------------------------------ */
 static void net_drain_socket(void) {
-    /* Drain all currently-available data (socket is non-blocking).
-       A single recv per tick is too slow for the initial chunk flood. */
+    /* Drain all currently-available data (socket is non-blocking). */
     while (g_net.rx_len < NET_RX_CAP) {
         int r = sceNetRecv(g_net.sock, g_net.rx + g_net.rx_len, NET_RX_CAP - g_net.rx_len, 0);
         if (r > 0) {
@@ -1154,6 +1213,39 @@ static void net_process_inbound(void) {
         memcpy(g_net.rx + g_net.rx_dec, g_net.crypt, (size_t)outl);
     }
     g_net.rx_dec = g_net.rx_len;
+
+    /* First pass: quickly scan for keepalive packets to prevent server
+       timeout during the initial chunk flood.  Keepalive packets are
+       small (< 256 bytes) and always sent uncompressed (data_length=0),
+       so we can identify them by reading just 2 bytes per frame without
+       doing expensive decompression of chunk data. */
+    if (g_net.phase == PHASE_PLAY && g_net.comp_threshold >= 0) {
+        size_t kp = 0;
+        while (kp < g_net.rx_len) {
+            RCUR kr = { g_net.rx, g_net.rx_len, kp };
+            int32_t kflen = rc_varint(&kr);
+            if (kflen <= 0 || (size_t)kflen > NET_INFLATE_CAP) break;
+            if (kr.p + (size_t)kflen > g_net.rx_len) break; /* partial frame */
+            /* Uncompressed packet: data_length=0, then packet ID varint */
+            if (kr.p + 2 <= g_net.rx_len && g_net.rx[kr.p] == 0x00) {
+                uint8_t pid = g_net.rx[kr.p + 1];
+                if (pid == 0x1F || pid == 0x2F) {
+                    uint8_t *kk = g_net.rx + kr.p + 2; /* skip data_length + packet_id */
+                    RCUR kcur = { kk, (size_t)(kflen - 2), 0 };
+                    if (pid == 0x1F) {
+                        handle_keep_alive(&kcur);
+                        packets_recv++;
+                        keepalive_send_time = 0;
+                        log_debug("play: keepalive processed in first-pass scan");
+                    } else if (pid == 0x2F) {
+                        handle_position_look(&kcur);
+                        log_debug("play: position look processed in first-pass scan");
+                    }
+                }
+            }
+            kp = kr.p + (size_t)kflen;
+        }
+    }
 
     size_t p = 0;
     int packets_this_call = 0;
@@ -1205,10 +1297,24 @@ static void net_process_inbound(void) {
         p = r.p + (size_t)flen;
         if (g_net.sock < 0) break;
         /* Process a few packets per frame so input/camera stays
-           responsive during the initial chunk flood.  Bumped from 3 to 16
-           so KeepAlive (0x1F) responses aren't dropped in the chunk flood —
-           dropping them causes the server to kick us for keepalive timeout. */
-        if (packets_this_call >= 16) break;
+           responsive during the initial chunk flood.  Keep this low
+           so that net_process_inbound returns quickly and the main
+           loop can send heartbeats and render frames. */
+        if (packets_this_call >= 4) break;
+    }
+
+    /* Send a periodic Player (0x0C) heartbeat during the chunk flood.
+       Without this, net_process_inbound blocks for seconds while
+       decoding chunks, preventing net_tick from sending heartbeats
+       and causing the server to read-timeout-kick us. */
+    if (g_net.phase == PHASE_PLAY && g_player) {
+        static SceUInt64 last_hb_inbound = 0;
+        SceUInt64 now_hb = sceKernelGetProcessTimeWide();
+        if (now_hb - last_hb_inbound >= 1000000) {  /* 1 second */
+            last_hb_inbound = now_hb;
+            uint8_t hb_body[1] = { g_player->on_ground ? 1 : 0 };
+            pkt_send(0x0C, hb_body, 1);
+        }
     }
 
     if (p > 0) {
@@ -1236,12 +1342,21 @@ static int pkt_login_start(const char *name) {
 static void net_tick_connecting(void) {
     int so_error = 0; unsigned int len = sizeof(so_error);
     sceNetGetsockopt(g_net.sock, SOL_SOCKET, SO_ERROR, &so_error, &len);
-    if (so_error != 0) {
+    if (so_error != 0 && so_error != 36 && so_error != 119) {
         log_debug("net_tick: connect failed errno=%d", so_error);
         net_disconnect("connect failed");
         return;
     }
-
+    if (so_error == 36 || so_error == 119) {
+        /* Non-blocking connect still in progress, wait for next tick */
+        if (++connect_ticks > 600) {
+            log_debug("net_tick: connect timeout");
+            net_disconnect("connect timeout");
+            return;
+        }
+        return;
+    }
+    /* so_error == 0: connection established */
     if (g_net.phase == PHASE_CONNECTING) {
         if (++connect_ticks > 600) {
             log_debug("net_tick: connect timeout");
@@ -1295,7 +1410,7 @@ static void net_tick_play(Player *p) {
                 spawn_x = 8; spawn_y = 64; spawn_z = 8;
             }
 
-            log_debug("play: Position & Look timeout (30s), using position (%d,%d,%d), spawn_received=%d, have_spawn=%d",
+            log_debug("play: Position & Look timeout (3s), using position (%d,%d,%d), spawn_received=%d, have_spawn=%d",
                       spawn_x, spawn_y, spawn_z, g_net.spawn_position_received, g_net.have_spawn);
             p->x = (float)spawn_x;
             p->y = (float)spawn_y;
@@ -1314,6 +1429,7 @@ static void net_tick_play(Player *p) {
                 g_net.have_spawn = 1;
             }
             position_look_received = 1;
+            last_confirmed_tid = -1;
             last_position_look_time = sceKernelGetProcessTimeWide();
             log_debug("play: FALLBACK triggered, origin=(%d,%d), sending position updates", g_net.origin_cx, g_net.origin_cz);
         }
@@ -1325,30 +1441,11 @@ static void net_tick_play(Player *p) {
        KeepAlive (0x1F) every ~15s; handle_keep_alive() echoes it back. */
     /* (proactive keepalive removed) */
 
-    /* Only send position updates AFTER we've received Position & Look and sent Confirm Teleport.
-       Throttle to ~20Hz (every 50ms) — vanilla sends position every 20 ticks (1s) when
-       standing still, and every tick when moving.  Sending every frame (60Hz) overwhelms
-       the Vita socket buffer (kerr=32 = ENOBUF) and causes disconnects. */
-    static SceUInt64 last_pos_send = 0;
-    SceUInt64 now_pos = sceKernelGetProcessTimeWide();
-    if (position_look_received && (now_pos - last_pos_send >= 50000)) {
-        last_pos_send = now_pos;
-        uint8_t buf[37];
-        size_t n = 0;
-        uint64_t ux, uy, uz;
-        uint32_t uyaw, upitch;
-        double dx = p->x, dy = p->y, dz = p->z;
-        float fyaw = p->yaw, fpitch = p->pitch;
-        memcpy(&ux, &dx, 8); memcpy(&uy, &dy, 8); memcpy(&uz, &dz, 8);
-        memcpy(&uyaw, &fyaw, 4); memcpy(&upitch, &fpitch, 4);
-        for (int i = 0; i < 8; i++) buf[n++] = (uint8_t)((ux >> (8 * (7 - i))) & 0xFF);
-        for (int i = 0; i < 8; i++) buf[n++] = (uint8_t)((uy >> (8 * (7 - i))) & 0xFF);
-        for (int i = 0; i < 8; i++) buf[n++] = (uint8_t)((uz >> (8 * (7 - i))) & 0xFF);
-        for (int i = 0; i < 4; i++) buf[n++] = (uint8_t)((uyaw >> (8 * (3 - i))) & 0xFF);
-        for (int i = 0; i < 4; i++) buf[n++] = (uint8_t)((upitch >> (8 * (3 - i))) & 0xFF);
-        buf[n++] = p->on_ground ? 1 : 0;
-        pkt_send(0x0E, buf, n);
-    }
+    /* CPacketPlayer.PositionRotation (0x0E) - send on meaningful change,
+       plus a 1-second heartbeat so the server doesn't idle-kick us.
+       Vanilla sends Player Position once every 20 ticks (1s) even when
+       stationary, and on every movement tick. */
+    net_send_position_look(p);
 }
 
 void net_tick(Player *p) {
@@ -1359,11 +1456,144 @@ void net_tick(Player *p) {
         net_tick_connecting();
     }
 
+    /* Send periodic Player (0x0C) heartbeat BEFORE processing inbound
+       data.  During the initial chunk flood, net_process_inbound can
+       block for several seconds, delaying net_tick_play (and thus the
+       heartbeat).  The server's read timeout kicks in before we get
+       a chance to send any outgoing packet. */
+    if (g_net.phase == PHASE_PLAY && p) {
+        static SceUInt64 last_heartbeat = 0;
+        SceUInt64 now = sceKernelGetProcessTimeWide();
+        if (now - last_heartbeat >= 1000000) {
+            last_heartbeat = now;
+            uint8_t hb_body[1] = { p->on_ground ? 1 : 0 };
+            pkt_send(0x0C, hb_body, 1);
+        }
+    }
+
     net_drain_socket();
     net_process_inbound();
 
     if (g_net.phase == PHASE_PLAY) {
+        static SceUInt64 last_net_log = 0;
+        SceUInt64 now_log = sceKernelGetProcessTimeWide();
+        if (now_log - last_net_log >= 2000000) {
+            log_debug("net_tick: phase=PLAY pos_recv=%d eid=%d comp_thresh=%d",
+                      position_look_received, g_net.entity_id, g_net.comp_threshold);
+            last_net_log = now_log;
+        }
         net_tick_play(p);
+    }
+}
+
+static int net_socket_writable(void) {
+    if (g_net.sock < 0) return 0;
+    int eid = sceNetEpollCreate("javac_sock_check", 0);
+    if (eid < 0) return 1;
+    SceNetEpollEvent ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.events = SCE_NET_EPOLLOUT | SCE_NET_EPOLLERR | SCE_NET_EPOLLHUP;
+    int ret = sceNetEpollControl(eid, SCE_NET_EPOLL_CTL_ADD, g_net.sock, &ev);
+    if (ret < 0) { sceNetEpollDestroy(eid); return 1; }
+    ret = sceNetEpollWait(eid, &ev, 1, 50); /* 50ms timeout */
+    sceNetEpollControl(eid, SCE_NET_EPOLL_CTL_DEL, g_net.sock, NULL);
+    sceNetEpollDestroy(eid);
+    if (ret < 0) return 1;
+    if (ret == 0) return 0; /* timeout — socket not writable */
+    if (ev.events & (SCE_NET_EPOLLERR | SCE_NET_EPOLLHUP)) return -1;
+    return 1;
+}
+
+void net_send_player_heartbeat(Player *p) {
+    /* Send Player (0x0C) — on_ground only. No position data.
+       This resets the server's idle timeout without sending invalid
+       positions before we've received the server's PositionAndLook (0x2F). */
+    static SceUInt64 last_hb = 0;
+    SceUInt64 now = sceKernelGetProcessTimeWide();
+    if (now - last_hb < 1000000) return; /* 1 second */
+    last_hb = now;
+
+    uint8_t body[1];
+    body[0] = p->on_ground ? 1 : 0;
+    static int hb_log = 0;
+    if ((hb_log++ % 10) == 0) log_debug("play: heartbeat Player (0x0C) on_ground=%d", p->on_ground ? 1 : 0);
+    int ret = pkt_send(0x0C, body, 1);
+    if (ret != 0) {
+        log_debug("play: Player heartbeat send FAILED");
+    }
+}
+
+void net_send_position_look(Player *p) {
+    /* Vanilla behavior:
+       - Before receiving server PositionAndLook (0x2F): send Player (0x0C)
+         heartbeat (just on_ground) to keep idle timeout alive.
+       - After receiving 0x2F: send PositionAndLook (0x0E) on significant
+         movement (delta > 0.01 blocks, > 1° rotation) or 500ms heartbeat.
+    */
+    static double last_x = 0.0, last_y = 0.0, last_z = 0.0;
+    static float last_yaw = 0.0f, last_pitch = 0.0f;
+    static int last_on_ground = -1;
+    static SceUInt64 last_send = 0;
+
+    SceUInt64 now = sceKernelGetProcessTimeWide();
+
+    if (!position_look_received) {
+        /* Haven't received server's PositionAndLook yet — send Player (0x0C) */
+        net_send_player_heartbeat(p);
+        return;
+    }
+
+    /* After receiving server's PositionAndLook — send PositionAndLook (0x0E)
+       only on significant change or periodic heartbeat */
+    double dx = fabs(p->x - last_x);
+    double dy = fabs(p->y - last_y);
+    double dz = fabs(p->z - last_z);
+    float dyaw = fabsf(p->yaw - last_yaw);
+    float dpitch = fabsf(p->pitch - last_pitch);
+    int dground = (p->on_ground ? 1 : 0) != last_on_ground;
+
+    int moved = (dx > 0.01 || dy > 0.01 || dz > 0.01 ||
+                 dyaw > 1.0f || dpitch > 1.0f || dground);
+
+    int send_interval = (now - last_send >= 500000); /* 500ms min interval */
+
+    if (!moved && !send_interval) return;
+
+    /* Check socket writability before sending */
+    int writable = net_socket_writable();
+    if (writable <= 0) {
+        if (writable < 0) {
+            log_debug("play: socket not writable (error), closing");
+            if (g_net.sock >= 0) { sceNetSocketClose(g_net.sock); g_net.sock = -1; }
+        }
+        return;
+    }
+
+    uint8_t buf[41];
+    size_t n = 0;
+    uint64_t ux, uy, uz;
+    uint32_t uyaw, upitch;
+    double px = p->x, py = p->y, pz = p->z;
+    memcpy(&ux, &px, 8); memcpy(&uy, &py, 8); memcpy(&uz, &pz, 8);
+    for (int i = 0; i < 8; i++) buf[n++] = (uint8_t)((ux >> (8 * (7 - i))) & 0xFF);
+    for (int i = 0; i < 8; i++) buf[n++] = (uint8_t)((uy >> (8 * (7 - i))) & 0xFF);
+    for (int i = 0; i < 8; i++) buf[n++] = (uint8_t)((uz >> (8 * (7 - i))) & 0xFF);
+    memcpy(&uyaw, &p->yaw, 4); memcpy(&upitch, &p->pitch, 4);
+    for (int i = 0; i < 4; i++) buf[n++] = (uint8_t)((uyaw >> (8 * (3 - i))) & 0xFF);
+    for (int i = 0; i < 4; i++) buf[n++] = (uint8_t)((upitch >> (8 * (3 - i))) & 0xFF);
+    buf[n++] = p->on_ground ? 1 : 0;
+
+    last_x = p->x; last_y = p->y; last_z = p->z;
+    last_yaw = p->yaw; last_pitch = p->pitch;
+    last_on_ground = p->on_ground ? 1 : 0;
+    last_send = now;
+
+    static int pos_log = 0;
+    if ((pos_log++ % 10) == 0) log_debug("play: sending PositionAndLook (0x0E) body_len=%u yaw=%.1f pitch=%.1f x=%.1f y=%.1f z=%.1f on_ground=%d moved=%d",
+               (unsigned)n, p->yaw, p->pitch, p->x, p->y, p->z, p->on_ground ? 1 : 0, moved);
+    int send_result = pkt_send(0x0E, buf, n);
+    if (send_result != 0) {
+        log_debug("play: PositionAndLook send FAILED");
     }
 }
 
@@ -1376,15 +1606,82 @@ void net_send_respawn(void) {
     pkt_send(0x03, body, n);
 }
 
+void net_send_chat(const char *msg) {
+    /* 1.12.2 ChatMessage (0x0F):
+       message (string, max 256 chars), server-bound.
+       Format: string(varint length + data). No type byte in 1.12.2. */
+    uint8_t body[512];
+    size_t n = 0;
+    size_t mlen = strlen(msg);
+    if (mlen > 255) mlen = 255;
+    n += put_varint(body + n, (int32_t)mlen);
+    memcpy(body + n, msg, mlen);
+    n += mlen;
+    log_debug("chat: sending msg='%s' body_len=%u", msg, (unsigned)n);
+    pkt_send(0x02, body, n);
+}
+
 void net_send_player_action(int action) {
-    /* 1.12.2 PlayerAction (0x15), NOT 0x13.
-       0x13 is PlayerAbilities — the server reads our entity ID as the
-       abilities flags byte, then tries to read 4 more bytes and crashes.
+    /* 1.12.2 EntityAction (0x15), NOT 0x14.
+       0x14 is PlayerDigging — the server reads our entity ID as the
+       digging status varint (e.g. 671), then tries to read a Position
+       from the action bytes and crashes with ArrayIndexOutOfBounds.
        0x15 requires: entity ID (varint) + action (varint) + auxData (varint). */
     uint8_t body[16];
     size_t n = 0;
     n += put_varint(body + n, g_net.entity_id);  /* entity ID */
     n += put_varint(body + n, action);            /* action */
-    n += put_varint(body + n, 0);                 /* auxData = 0 */
+    n += put_varint(body + n, 0);                 /* auxData = jump boost */
     pkt_send(0x15, body, n);
+}
+
+void net_send_block_dig(int status, int x, int y, int z, int face) {
+    /* 1.12.2 PlayerDigging (0x14):
+       action (varint): 0=START_DESTROY_BLOCK, 1=ABORT_DESTROY_BLOCK, 2=STOP_DESTROY_BLOCK,
+                       3=DROP_ALL_ITEMS, 4=DROP_ITEM, 5=RELEASE_USE_ITEM, 6=SWAP_HELD_ITEMS
+       position (BlockPos): packed long (8 bytes BE)
+       facing (byte): EnumFacing index 0=DOWN,1=UP,2=NORTH,3=SOUTH,4=WEST,5=EAST
+       Convert FaceDir (client internal) to EnumFacing (server) */
+    static const int face_map[6] = {3, 2, 4, 5, 1, 0};
+    int server_face = (face >= 0 && face <= 5) ? face_map[face] : 1;
+    uint8_t body[16];
+    size_t n = 0;
+    n += put_varint(body + n, status);
+    /* BlockPos packed long: 8 bytes big-endian */
+    uint64_t packed = (((uint64_t)(uint32_t)x & 0x3FFFFFFULL) << 38) |
+                      (((uint64_t)(uint32_t)y & 0xFFFULL) << 26) |
+                      (((uint64_t)(uint32_t)z & 0x3FFFFFFULL));
+    for (int i = 7; i >= 0; i--)
+        body[n++] = (uint8_t)((packed >> (8 * i)) & 0xFF);
+    body[n++] = (uint8_t)server_face;
+    log_debug("play: block dig status=%d at (%d,%d,%d) face=%d->%d", status, x, y, z, face, server_face);
+    pkt_send(0x14, body, n);
+}
+
+void net_send_block_place(int x, int y, int z, int face) {
+    /* 1.12.2 PlayerTryUseItemOnBlock (0x1F):
+       position (BlockPos): packed long (8 bytes BE)
+       direction (EnumFacing): varint
+       hand (EnumHand): varint = 0 (main hand)
+       facingX/Y/Z (float BE): cursor hit coords
+       Convert FaceDir (client internal) to EnumFacing (server) */
+    static const int face_map[6] = {3, 2, 4, 5, 1, 0};
+    int server_face = (face >= 0 && face <= 5) ? face_map[face] : 1;
+    uint8_t body[32];
+    size_t n = 0;
+    uint64_t packed = (((uint64_t)(uint32_t)x & 0x3FFFFFFULL) << 38) |
+                      (((uint64_t)(uint32_t)y & 0xFFFULL) << 26) |
+                      (((uint64_t)(uint32_t)z & 0x3FFFFFFULL));
+    for (int i = 7; i >= 0; i--)
+        body[n++] = (uint8_t)((packed >> (8 * i)) & 0xFF);
+    n += put_varint(body + n, server_face);
+    n += put_varint(body + n, 0);                /* hand: main hand */
+    float cx = 0.5f, cy = 0.5f, cz = 0.5f;
+    uint32_t ucx, ucy, ucz;
+    memcpy(&ucx, &cx, 4); memcpy(&ucy, &cy, 4); memcpy(&ucz, &cz, 4);
+    for (int i = 0; i < 4; i++) body[n++] = (uint8_t)((ucx >> (8 * (3 - i))) & 0xFF);
+    for (int i = 0; i < 4; i++) body[n++] = (uint8_t)((ucy >> (8 * (3 - i))) & 0xFF);
+    for (int i = 0; i < 4; i++) body[n++] = (uint8_t)((ucz >> (8 * (3 - i))) & 0xFF);
+    log_debug("play: block place at (%d,%d,%d) face=%d->%d", x, y, z, face, server_face);
+    pkt_send(0x1F, body, n);
 }

@@ -97,16 +97,31 @@ void draw_selection(float x, float y, float z) {
 
 void draw_crosshair() {
     glPushMatrix();
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity(); /* MUST clear projection before glOrtho — glOrtho multiplies, not replaces */
     glOrtho(0, 960, 544, 0, -1, 1);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_TEXTURE_2D);
-    glColor4f(1,1,1,1);
+    /* Black crosshair — visible against sky, grass, and snow.
+       White was invisible against the sky background. */
+    glColor4f(0,0,0,1);
     glLineWidth(2.0f);
     glBegin(GL_LINES);
     glVertex2f(474,272); glVertex2f(486,272);
     glVertex2f(480,266); glVertex2f(480,278);
     glEnd();
-    glEnable(GL_DEPTH_TEST);
-    glEnable(GL_TEXTURE_2D);
+    /* White inner cross for contrast */
+    glColor4f(1,1,1,1);
+    glLineWidth(1.0f);
+    glBegin(GL_LINES);
+    glVertex2f(476,272); glVertex2f(484,272);
+    glVertex2f(480,268); glVertex2f(480,276);
+    glEnd();
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
     glPopMatrix();
 }

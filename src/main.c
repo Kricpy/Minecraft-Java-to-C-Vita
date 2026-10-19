@@ -1,7 +1,3 @@
-/* --- FORWARD DECLARATIONS FOR NETWORK FUNCTIONS --- */
-void net_send_respawn(void);
-void net_send_player_action(int state);
-
 #include <psp2/kernel/processmgr.h>
 #include <psp2/ctrl.h>
 #include <psp2/kernel/sysmem.h>
@@ -20,6 +16,13 @@ void net_send_player_action(int state);
 #include "raycast.h"
 #include "renderer.h"
 #include "network.h"
+
+/* --- FORWARD DECLARATIONS FOR NETWORK FUNCTIONS --- */
+void net_send_respawn(void);
+void net_send_position_look(Player *p);
+void net_send_player_action(int state);
+void net_send_block_dig(int status, int x, int y, int z, int face);
+void net_send_block_place(int x, int y, int z, int face);
 
 #define LOG_MAX_LINES 6
 #define LOG_LINE_LEN  128
@@ -581,10 +584,14 @@ int main() {
 
     net_init();
     
+    static int auto_connect_attempts = 0;
     int conn = net_connect("kreqxs.aternos.me", 11113, "VitaPlayer");
     if (conn < 0) {
-        log_debug("main: initial connect failed, will use menu");
+        log_debug("main: initial connect failed, will retry automatically");
+    } else {
+        log_debug("main: initial connect started (sock=%d)", conn);
     }
+    static SceUInt64 last_auto_connect_attempt = 0;
 
 Player player;
     player_init(&player);
@@ -618,11 +625,36 @@ Player player;
             last_net_tick = now;
         }
 
+        /* AUTO-CONNECT RETRY: if socket is dead and we're not in PLAY,
+           retry connecting every 5 seconds so the user doesn't have to
+           manually open the config menu after a failed initial connect. */
+        static SceUInt64 last_reconnect_attempt = 0;
+        if (g_net.sock < 0 && g_net.phase != PHASE_PLAY &&
+            now - last_reconnect_attempt > 5000000) {
+            last_reconnect_attempt = now;
+            auto_connect_attempts++;
+            log_debug("main: auto-connect retry #%d to %s:%d",
+                      auto_connect_attempts, g_net.host[0] ? g_net.host : "kreqxs.aternos.me", g_net.port ? g_net.port : 11113);
+            net_connect(g_net.host[0] ? g_net.host : "kreqxs.aternos.me",
+                        g_net.port ? g_net.port : 11113, "VitaPlayer");
+        }
+
         SceCtrlData ctrl;
         sceCtrlPeekBufferPositive(0, &ctrl, 1);
         
-        if (ctrl.buttons & SCE_CTRL_START) break;
-        
+if (ctrl.buttons & SCE_CTRL_START) break;
+
+        /* SELECT button opens chat input */
+        if (ctrl.buttons & SCE_CTRL_SELECT) {
+            if (!ime_active && menu_cooldown == 0) {
+                ime_target = 2;
+                ime_open("Chat", "", SCE_IME_TYPE_DEFAULT, 256);
+                ime_active = 1;
+                log_debug("main: chat opened via SELECT");
+                menu_cooldown = 30;
+            }
+        }
+
         /* L + R shoulder buttons toggle the config menu. */
         int lr_held = (ctrl.buttons & SCE_CTRL_LTRIGGER) && (ctrl.buttons & SCE_CTRL_RTRIGGER);
         if (lr_held && !prev_lr_held) {
@@ -645,11 +677,20 @@ Player player;
                     strncpy(server_host, result, sizeof(server_host) - 1);
                     server_host[sizeof(server_host) - 1] = 0;
                     log_debug("menu: server address set to %s", server_host);
-                } else {
+                } else if (ime_target == 1) {
                     int p = atoi(result);
                     if (p >= 1 && p <= 65535) {
                         server_port = p;
                         log_debug("menu: port set to %d", server_port);
+                    }
+                } else if (ime_target == 2) {
+                    /* Chat message — send raw text, not /say command.
+                       /say may not be registered on all servers, and
+                       wrapping in /say adds an extra token that the
+                       server rejects.  Send the message directly. */
+                    if (result[0]) {
+                        net_send_chat(result);
+                        log_debug("chat: sent '%s'", result);
                     }
                 }
             }
@@ -697,22 +738,76 @@ Player player;
         player_update(&player, frame_dt);
 
         /* Send sneaking/sprint state changes to the server.
-           1.12.2 Client→Server PlayerAction (0x13):
+           1.12.2 EntityAction (0x15):
            action 0 = START_SNEAKING, 1 = STOP_SNEAKING,
            action 3 = START_SPRINTING, 4 = STOP_SPRINTING.
-           Without this the server never sees the player crouch or
-           sprint, so the PC-side POV shows them standing. */
+           Aux data = jump boost (0 for player). */
         static int last_sneak = -1, last_sprint = -1;
         int cur_sneak = player.is_sneaking ? 1 : 0;
         int cur_sprint = player.is_sprinting ? 1 : 0;
         if (cur_sneak != last_sneak) {
             net_send_player_action(cur_sneak ? 0 : 1);
+            log_debug("main: EntityAction sneak=%d (0=START_SNEAKING, 1=STOP_SNEAKING)", cur_sneak ? 0 : 1);
             last_sneak = cur_sneak;
         }
         if (cur_sprint != last_sprint) {
             net_send_player_action(cur_sprint ? 3 : 4);
+            log_debug("main: EntityAction sprint=%d (3=START_SPRINTING, 4=STOP_SPRINTING)", cur_sprint ? 3 : 4);
             last_sprint = cur_sprint;
         }
+
+        /* Block interaction: L = place/interact, R = break/dig */
+        static int last_l = 0, last_r = 0;
+        int cur_l = (ctrl.buttons & SCE_CTRL_LTRIGGER) ? 1 : 0;
+        int cur_r = (ctrl.buttons & SCE_CTRL_RTRIGGER) ? 1 : 0;
+        float cur_eye = player.is_sneaking ? CROUCH_EYE_LEVEL : STANDING_EYE_LEVEL;
+
+        if (cur_l && !last_l) {
+            /* Raycast to find target block for placing */
+            float rad_yaw   = (player.yaw) * DEG_TO_RAD;
+            float rad_pitch = player.pitch * DEG_TO_RAD;
+            float ldx = -sinf(rad_yaw) * cosf(rad_pitch);
+            float ldy = -sinf(rad_pitch);
+            float ldz =  cosf(rad_yaw) * cosf(rad_pitch);
+            int hx, hy, hz, fd;
+            if (perform_raycast(player.render_x, player.render_y + cur_eye, player.render_z,
+                                ldx, ldy, ldz, &hx, &hy, &hz, &fd)) {
+                /* Place adjacent block on hit face */
+                int px = hx, py = hy, pz = hz;
+                if      (fd == FACE_TOP)    py += 1;
+                else if (fd == FACE_BOTTOM) py -= 1;
+                else if (fd == FACE_FRONT)  pz += 1;
+                else if (fd == FACE_BACK)   pz -= 1;
+                else if (fd == FACE_LEFT)   px -= 1;
+                else if (fd == FACE_RIGHT)  px += 1;
+                net_send_block_place(px, py, pz, fd);
+                log_debug("main: L place block at (%d,%d,%d) face=%d", px, py, pz, fd);
+            }
+        }
+
+        if (cur_r && !last_r) {
+            /* Start digging on press */
+            float rad_yaw   = (player.yaw) * DEG_TO_RAD;
+            float rad_pitch = player.pitch * DEG_TO_RAD;
+            float ldx = -sinf(rad_yaw) * cosf(rad_pitch);
+            float ldy = -sinf(rad_pitch);
+            float ldz =  cosf(rad_yaw) * cosf(rad_pitch);
+            int hx, hy, hz, fd;
+            if (perform_raycast(player.render_x, player.render_y + cur_eye, player.render_z,
+                                ldx, ldy, ldz, &hx, &hy, &hz, &fd)) {
+                net_send_block_dig(0, hx, hy, hz, fd);  /* START_DESTROY_BLOCK */
+                log_debug("main: R start dig block at (%d,%d,%d) face=%d", hx, hy, hz, fd);
+            }
+        }
+
+        if (!cur_r && last_r) {
+            /* Stop digging on release */
+            net_send_block_dig(2, 0, 0, 0, 0);  /* STOP_DESTROY_BLOCK */
+            log_debug("main: R stop dig");
+        }
+
+        last_l = cur_l;
+        last_r = cur_r;
 
         /* Incremental chunk rebuild - process multiple chunks per frame */
         static int rebuild_index = 0;
@@ -769,18 +864,18 @@ Player player;
         if (render_frame % 60 == 0) log_debug("render: frame %d draw_all_chunks done", render_frame);
         render_frame++;
 
-        /* Block highlight from a raycast along the look direction */
+/* Block highlight from a raycast along the look direction */
         {
-            /* Raycast direction must match the camera's forward vector exactly.
-           Camera: glRotatef(pitch,1,0,0) * glRotatef(yaw+180,0,1,0)
-           Forward = (-sin(yaw), sin(pitch)*cos(yaw), cos(pitch)*cos(yaw))
-           The old formula used -sin(yaw)*cos(pitch)/-sin(pitch)/cos(yaw)*cos(pitch)
-           which is a different convention and points the wrong way. */
+            /* Raycast direction MUST match the camera's forward vector exactly.
+               Camera matrix: glRotatef(pitch,1,0,0) * glRotatef(yaw+180,0,1,0)
+               Forward = (-sin(yaw)*cos(pitch), -sin(pitch), cos(yaw)*cos(pitch))
+               The old formula had X sign wrong and misplaced cos(yaw) on Y/Z,
+               causing the block outline to appear to the side of the crosshair. */
             float rad_yaw   = (player.yaw) * DEG_TO_RAD;
             float rad_pitch = player.pitch * DEG_TO_RAD;
-            float ldx = -sinf(rad_yaw);
-            float ldy = sinf(rad_pitch) * cosf(rad_yaw);
-            float ldz = cosf(rad_pitch) * cosf(rad_yaw);
+            float ldx = -sinf(rad_yaw) * cosf(rad_pitch);
+            float ldy = -sinf(rad_pitch);
+            float ldz =  cosf(rad_yaw) * cosf(rad_pitch);
             int hx, hy, hz, fd;
             if (perform_raycast(player.render_x, player.render_y + current_eye, player.render_z,
                                 ldx, ldy, ldz, &hx, &hy, &hz, &fd)) {
