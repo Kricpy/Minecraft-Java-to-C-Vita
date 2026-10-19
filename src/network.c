@@ -606,14 +606,8 @@ static void handle_join_game(RCUR *r) {
         /* For respawns, keep position but reset timer */
         last_position_look_time = sceKernelGetProcessTimeWide();
     }
-    /* Reset teleport confirm tracking on join/respawn — server starts teleportId at 0 */
-    {
-        static int last_join_eid = -999;
-        if ((int)g_net.entity_id != last_join_eid) {
-            last_confirmed_tid = -1;
-            last_join_eid = (int)g_net.entity_id;
-        }
-    }
+    /* Reset teleport confirm tracking on JoinGame — server resets teleportId counter */
+    last_confirmed_tid = -1;
 
     /* CPacketClientSettings: lang(<=16), view, chat vis, colors, model parts, main hand */
 
