@@ -827,16 +827,9 @@ if (ctrl.buttons & SCE_CTRL_START) break;
                     /* Send Animation (0x1D) to swing arm */
                     extern void net_send_animation(int hand);
                     net_send_animation(0);
-                    /* Place adjacent block on hit face */
-                    int px = hx, py = hy, pz = hz;
-                    if      (fd == FACE_TOP)    py += 1;
-                    else if (fd == FACE_BOTTOM) py -= 1;
-                    else if (fd == FACE_FRONT)  pz += 1;
-                    else if (fd == FACE_BACK)   pz -= 1;
-                    else if (fd == FACE_LEFT)   px -= 1;
-                    else if (fd == FACE_RIGHT)  px += 1;
-                    net_send_block_place(px, py, pz, fd);
-                    log_debug("main: L place block at (%d,%d,%d) face=%d item=%d", px, py, pz, fd, g_net.held_item_id);
+                    /* Place block: location = TARGET block (hx,hy,hz), direction = face of target */
+                    net_send_block_place(hx, hy, hz, fd);
+                    log_debug("main: L place on (%d,%d,%d) face=%d item=%d", hx, hy, hz, fd, g_net.held_item_id);
                 } else {
                     log_debug("main: L NO block placed - have_held=%d held_item=%d slot=%d",
                               g_net.have_held_item, g_net.held_item_id, g_net.selected_slot);

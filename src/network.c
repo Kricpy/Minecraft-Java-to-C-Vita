@@ -1797,10 +1797,13 @@ void net_send_use_entity(int entity_id, int action) {
 
 void net_send_held_item_change(int slot) {
     /* 1.12.2 HeldItemChange (0x1A serverbound):
-       slotId (VarInt) — 0-8 for hotbar slots */
-    uint8_t body[4];
-    size_t n = put_varint(body, slot);
-    pkt_send(0x1A, body, n);
+       slotId: i16 (Short, big-endian) — 0-8 for hotbar slots
+       NOTE: prismarine-data specifies i16 for serverbound,
+       i8 for clientbound (0x3A). */
+    uint8_t body[2];
+    body[0] = (uint8_t)((slot >> 8) & 0xFF);
+    body[1] = (uint8_t)(slot & 0xFF);
+    pkt_send(0x1A, body, 2);
 }
 
 void net_send_block_dig(int status, int x, int y, int z, int face) {
