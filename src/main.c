@@ -772,6 +772,9 @@ if (ctrl.buttons & SCE_CTRL_START) break;
             int hx, hy, hz, fd;
             if (perform_raycast(player.render_x, player.render_y + cur_eye, player.render_z,
                                 ldx, ldy, ldz, &hx, &hy, &hz, &fd)) {
+                /* Send Animation (0x1D) to swing arm */
+                extern void net_send_animation(int hand);
+                net_send_animation(0);
                 /* Place adjacent block on hit face */
                 int px = hx, py = hy, pz = hz;
                 if      (fd == FACE_TOP)    py += 1;
@@ -795,14 +798,17 @@ if (ctrl.buttons & SCE_CTRL_START) break;
             int hx, hy, hz, fd;
             if (perform_raycast(player.render_x, player.render_y + cur_eye, player.render_z,
                                 ldx, ldy, ldz, &hx, &hy, &hz, &fd)) {
+                /* Send Animation (0x1D) to swing arm */
+                extern void net_send_animation(int hand);
+                net_send_animation(0);
                 net_send_block_dig(0, hx, hy, hz, fd);  /* START_DESTROY_BLOCK */
                 log_debug("main: R start dig block at (%d,%d,%d) face=%d", hx, hy, hz, fd);
             }
         }
 
         if (!cur_r && last_r) {
-            /* Stop digging on release */
-            net_send_block_dig(2, 0, 0, 0, 0);  /* STOP_DESTROY_BLOCK */
+            /* Cancel digging on release (not finish - player must hold to break) */
+            net_send_block_dig(1, 0, 0, 0, 0);  /* CANCEL_DESTROY_BLOCK */
             log_debug("main: R stop dig");
         }
 

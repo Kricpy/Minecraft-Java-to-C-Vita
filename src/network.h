@@ -74,6 +74,7 @@ void net_send_chat(const char *msg);
 void net_send_respawn(void);
 void net_send_position_look(Player *p);
 void net_send_player_action(int action);
+    void net_send_animation(int hand);
     void net_send_block_dig(int status, int x, int y, int z, int face);
     void net_send_block_place(int x, int y, int z, int face);
 

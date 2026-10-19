@@ -1635,6 +1635,13 @@ void net_send_player_action(int action) {
     pkt_send(0x15, body, n);
 }
 
+void net_send_animation(int hand) {
+    /* 1.12.2 Animation (0x1D): hand (VarInt Enum) - 0=main hand, 1=off hand */
+    uint8_t body[4];
+    body[0] = hand & 0x7F;
+    pkt_send(0x1D, body, 1);
+}
+
 void net_send_block_dig(int status, int x, int y, int z, int face) {
     /* 1.12.2 PlayerDigging (0x14):
        action (varint): 0=START_DESTROY_BLOCK, 1=ABORT_DESTROY_BLOCK, 2=STOP_DESTROY_BLOCK,
