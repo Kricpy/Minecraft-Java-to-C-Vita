@@ -28,6 +28,8 @@ typedef struct {
     char username[17];
     int dimension;
     int gamemode;
+    int held_item_id;
+    int have_held_item;
     double spawn_x, spawn_y, spawn_z;
     float spawn_yaw, spawn_pitch;
     double pos_x, pos_y, pos_z;

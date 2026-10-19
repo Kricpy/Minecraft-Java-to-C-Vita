@@ -772,19 +772,22 @@ if (ctrl.buttons & SCE_CTRL_START) break;
             int hx, hy, hz, fd;
             if (perform_raycast(player.render_x, player.render_y + cur_eye, player.render_z,
                                 ldx, ldy, ldz, &hx, &hy, &hz, &fd)) {
-                /* Send Animation (0x1D) to swing arm */
-                extern void net_send_animation(int hand);
-                net_send_animation(0);
-                /* Place adjacent block on hit face */
-                int px = hx, py = hy, pz = hz;
-                if      (fd == FACE_TOP)    py += 1;
-                else if (fd == FACE_BOTTOM) py -= 1;
-                else if (fd == FACE_FRONT)  pz += 1;
-                else if (fd == FACE_BACK)   pz -= 1;
-                else if (fd == FACE_LEFT)   px -= 1;
-                else if (fd == FACE_RIGHT)  px += 1;
-                net_send_block_place(px, py, pz, fd);
-                log_debug("main: L place block at (%d,%d,%d) face=%d", px, py, pz, fd);
+                /* Only send place packet + animation if holding a block (item ID > 0) */
+                if (g_net.have_held_item && g_net.held_item_id > 0) {
+                    /* Send Animation (0x1D) to swing arm */
+                    extern void net_send_animation(int hand);
+                    net_send_animation(0);
+                    /* Place adjacent block on hit face */
+                    int px = hx, py = hy, pz = hz;
+                    if      (fd == FACE_TOP)    py += 1;
+                    else if (fd == FACE_BOTTOM) py -= 1;
+                    else if (fd == FACE_FRONT)  pz += 1;
+                    else if (fd == FACE_BACK)   pz -= 1;
+                    else if (fd == FACE_LEFT)   px -= 1;
+                    else if (fd == FACE_RIGHT)  px += 1;
+                    net_send_block_place(px, py, pz, fd);
+                    log_debug("main: L place block at (%d,%d,%d) face=%d", px, py, pz, fd);
+                }
             }
         }
 
@@ -807,9 +810,11 @@ if (ctrl.buttons & SCE_CTRL_START) break;
         }
 
         if (!cur_r && last_r) {
-            /* Cancel digging on release (not finish - player must hold to break) */
-            net_send_block_dig(1, 0, 0, 0, 0);  /* CANCEL_DESTROY_BLOCK */
-            log_debug("main: R stop dig");
+            /* Finish digging on release — server validates break time.
+               Quick tap won't break (server rejects insufficient damage),
+               holding R breaks the block. */
+            net_send_block_dig(2, 0, 0, 0, 0);  /* STOP_DESTROY_BLOCK (FINISH) */
+            log_debug("main: R finish dig");
         }
 
         last_l = cur_l;

@@ -997,18 +997,57 @@ static void net_dispatch_play(const uint8_t *pk, int32_t len) {
     RCUR r = { pk, (size_t)len, 0 };
     int32_t id = rc_varint(&r);
     switch (id) {
-        case 0x0B: /* SPacketBlockChange */
-            {
-                int32_t bx = (int32_t)rc_u32(&r);
-                int32_t by = (int32_t)rc_u8(&r);
-                int32_t bz = (int32_t)rc_u32(&r);
-                int32_t bid = rc_varint(&r);
-                extern void chunk_set_block(int x, int y, int z, uint16_t packed);
-                chunk_set_block(bx, by, bz, (uint16_t)((bid << 4) | 0));
-                log_debug("play: BlockChange (%d,%d,%d) id=%d", bx, by, bz, bid);
-            }
-            break;
-        case 0x35: handle_respawn(&r); break;
+            case 0x0B: /* SPacketBlockChange */
+                {
+                    int32_t bx = (int32_t)rc_u32(&r);
+                    int32_t by = (int32_t)rc_u8(&r);
+                    int32_t bz = (int32_t)rc_u32(&r);
+                    int32_t bid = rc_varint(&r);
+                    extern void chunk_set_block(int x, int y, int z, uint16_t packed);
+                    chunk_set_block(bx, by, bz, (uint16_t)((bid << 4) | 0));
+                }
+                break;
+            case 0x14: /* SPacketWindowItems */
+                {
+                    rc_u8(&r); /* window id */
+                    int32_t count = rc_varint(&r);
+                    for (int i = 0; i < count; i++) {
+                        /* Parse Slot: Present(byte) + ItemID(varint) + Count(byte) + Damage(short) + NBT */
+                        uint8_t present = rc_u8(&r);
+                        if (present) {
+                            int32_t item_id = rc_varint(&r);
+                            rc_u8(&r); /* count */
+                            rc_u16(&r); /* damage */
+                            uint8_t nbt = rc_u8(&r);
+                            if (nbt) {
+                                /* Skip NBT compound: read string name + tags until 0x00 */
+                            }
+                        }
+                    }
+                }
+                break;
+            case 0x16: /* SPacketSetSlot */
+                {
+                    rc_u8(&r); /* window id */
+                    int32_t slot = rc_varint(&r);
+                    uint8_t present = rc_u8(&r);
+                    if (present) {
+                        int32_t item_id = rc_varint(&r);
+                        if (slot >= 0 && slot < 9) {
+                            g_net.held_item_id = item_id;
+                            g_net.have_held_item = 1;
+                        }
+                        rc_u8(&r); /* count */
+                        rc_u16(&r); /* damage */
+                        uint8_t nbt = rc_u8(&r);
+                        (void)nbt;
+                    } else if (slot >= 0 && slot < 9) {
+                        g_net.held_item_id = 0;
+                        g_net.have_held_item = 1;
+                    }
+                }
+                break;
+            case 0x35: handle_respawn(&r); break;
         case 0x0F: handle_chat(&r); break;
         case 0x1A: handle_disconnect("play", &r); break;
         case 0x1D: handle_unload_chunk(&r); break;
