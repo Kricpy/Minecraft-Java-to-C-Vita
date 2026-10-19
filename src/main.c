@@ -761,23 +761,24 @@ if (ctrl.buttons & SCE_CTRL_START) break;
         static int last_l = 0, last_r = 0;
         static int dig_hx=0, dig_hy=0, dig_hz=0, dig_fd=0, dig_active=0;
         static SceUInt64 dig_start_time = 0;
-        static int anim_counter = 0;
+        static SceUInt64 last_dig_anim_time = 0;
         int cur_l = (ctrl.buttons & SCE_CTRL_LTRIGGER) ? 1 : 0;
         int cur_r = (ctrl.buttons & SCE_CTRL_RTRIGGER) ? 1 : 0;
         float cur_eye = player.is_sneaking ? CROUCH_EYE_LEVEL : STANDING_EYE_LEVEL;
 
-        /* Block breaking: send periodic Animation while holding R for visual feedback */
+        /* Block breaking: send periodic Animation while holding R for visual feedback.
+           Use time-based intervals (every 200ms) instead of frame-based, so animations
+           are consistent regardless of frame rate (important when Vita drops frames
+           during chunk processing). */
         if (dig_active && cur_r) {
-            anim_counter++;
-            if (anim_counter >= 10) { /* every ~0.17s at 60fps, ~0.33s at 30fps */
-                anim_counter = 0;
+            SceUInt64 now = sceKernelGetProcessTimeWide();
+            if (now - last_dig_anim_time >= 200000) { /* 200ms */
+                last_dig_anim_time = now;
                 extern void net_send_animation(int hand);
                 net_send_animation(0);
             }
-            /* Auto-FINISH after break threshold — vanilla break time for stone
-               with fist is ~2.25s, but server may not validate time */
-            SceUInt64 now = sceKernelGetProcessTimeWide();
-            if (dig_start_time > 0 && now - dig_start_time >= 1000000) { /* 1.0 second */
+            /* Auto-FINISH after break threshold — server may validate break time */
+            if (dig_start_time > 0 && now - dig_start_time >= 500000) { /* 0.5 second */
                 net_send_block_dig(2, dig_hx, dig_hy, dig_hz, dig_fd);  /* STOP_DESTROY_BLOCK */
                 dig_active = 0;
                 log_debug("main: R auto-finish dig at (%d,%d,%d)", dig_hx, dig_hy, dig_hz);
@@ -830,7 +831,7 @@ if (ctrl.buttons & SCE_CTRL_START) break;
                 dig_hx = hx; dig_hy = hy; dig_hz = hz; dig_fd = fd;
                 dig_active = 1;
                 dig_start_time = sceKernelGetProcessTimeWide();
-                anim_counter = 0;
+                last_dig_anim_time = dig_start_time;
                 log_debug("main: R start dig block at (%d,%d,%d) face=%d", hx, hy, hz, fd);
             } else {
                 /* No block hit — attack nearest entity or punch air */

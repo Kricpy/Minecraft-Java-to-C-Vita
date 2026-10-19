@@ -3,6 +3,9 @@
 #include "chunk.h"
 
 #include <stdio.h>
+
+__attribute__((section(".pad")))
+static const uint8_t _pad_segment[8192] = {0};
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
@@ -119,8 +122,6 @@ static int rc_string(RCUR *r, char *out, size_t out_cap) {
     return 0;
 }
 
-static void rc_skip_nbt_recursive(RCUR *r);
-
 static void rc_skip_nbt(RCUR *r) {
     uint8_t type = rc_u8(r);
     if (type == 0x00) return; /* no NBT */
@@ -148,8 +149,7 @@ static void rc_skip_nbt(RCUR *r) {
             case 0x06: { for (int i=0;i<8;i++) rc_u8(r); } break; /* Double */
             case 0x07: { int32_t blen = rc_varint(r); for (int i=0;i<blen&&r->p<r->len;i++) rc_u8(r); } break; /* Byte Array */
             case 0x08: { int32_t slen = rc_varint(r); for (int i=0;i<slen&&r->p<r->len;i++) rc_u8(r); } break; /* String */
-            case 0x09: { uint8_t etype = rc_u8(r); int32_t elen = rc_varint(r); 
-                /* Simplified: skip based on element type size */
+            case 0x09: { uint8_t etype = rc_u8(r); int32_t elen = rc_varint(r);
                 switch (etype) {
                     case 0x01: for(int i=0;i<elen;i++) rc_u8(r); break;
                     case 0x02: for(int i=0;i<elen;i++) rc_u16(r); break;
@@ -159,14 +159,14 @@ static void rc_skip_nbt(RCUR *r) {
                     case 0x06: for(int i=0;i<elen;i++){for(int j=0;j<8;j++) rc_u8(r);} break;
                 }
             } break;
-            case 0x0A: rc_skip_nbt_recursive(r); break; /* Compound */
+            case 0x0A: rc_skip_nbt(r); break; /* Compound - recurse */
             case 0x0B: { int32_t ilen = rc_varint(r); for (int i=0;i<ilen&&r->p<r->len;i++){for(int j=0;j<4;j++) rc_u8(r);} } break; /* Int Array */
             case 0x0C: { int32_t llen = rc_varint(r); for (int i=0;i<llen&&r->p<r->len;i++){for(int j=0;j<8;j++) rc_u8(r);} } break; /* Long Array */
         }
     }
 }
 
-static void rc_skip_nbt_recursive(RCUR *r) {
+static void rc_skip_nbt_nested(RCUR *r) {
     int32_t nlen = rc_varint(r);
     for (int i = 0; i < nlen && r->p < r->len; i++) rc_u8(r);
     while (r->p < r->len) {
@@ -193,7 +193,7 @@ static void rc_skip_nbt_recursive(RCUR *r) {
                     case 0x06: for(int i=0;i<elen;i++){for(int j=0;j<8;j++) rc_u8(r);} break;
                 }
             } break;
-            case 0x0A: rc_skip_nbt_recursive(r); break;
+            case 0x0A: rc_skip_nbt(r); break;
             case 0x0B: { int32_t ilen = rc_varint(r); for (int i=0;i<ilen&&r->p<r->len;i++){for(int j=0;j<4;j++) rc_u8(r);} } break;
             case 0x0C: { int32_t llen = rc_varint(r); for (int i=0;i<llen&&r->p<r->len;i++){for(int j=0;j<8;j++) rc_u8(r);} } break;
         }
@@ -556,7 +556,10 @@ static void handle_keep_alive(RCUR *r) {
               (unsigned long long)id);
     log_debug("play: keepalive bytes: %02X %02X %02X %02X %02X %02X %02X %02X",
               body[0], body[1], body[2], body[3], body[4], body[5], body[6], body[7]);
-    pkt_send(0x0B, body, 8);
+    int ret = pkt_send(0x0B, body, 8);
+    if (ret != 0) {
+        log_debug("play: keepalive response send FAILED");
+    }
 }
 
 static void handle_confirm_teleport(RCUR *r) {
@@ -1099,13 +1102,15 @@ static void net_dispatch_play(const uint8_t *pk, int32_t len) {
                     rc_u8(&r); /* window id */
                     int32_t count = rc_u16(&r); /* Short */
                     for (int i = 0; i < count && r.p < r.len; i++) {
-                        uint8_t present = rc_u8(&r);
-                        if (present) {
-                            int32_t item_id = rc_varint(&r);
+                        uint16_t raw_id = rc_u16(&r); /* Short (i16) — NOT VarInt */
+                        if (raw_id != 0xFFFF) {
+                            int32_t item_id = (int32_t)raw_id;
                             rc_u8(&r); /* count (byte) */
                             rc_u16(&r); /* damage (short) */
                             rc_skip_nbt(&r);
                             if (i >= 0 && i < 9) g_net.hotbar_items[i] = item_id;
+                        } else {
+                            if (i >= 0 && i < 9) g_net.hotbar_items[i] = 0;
                         }
                     }
                     if (g_net.selected_slot >= 0 && g_net.selected_slot < 9) {
@@ -1114,13 +1119,13 @@ static void net_dispatch_play(const uint8_t *pk, int32_t len) {
                     }
                 }
                 break;
-             case 0x16: /* SPacketSetSlot */
+            case 0x16: /* SPacketSetSlot */
                 {
                     rc_u8(&r); /* window id */
                     int32_t slot = rc_u16(&r); /* Short */
-                    uint8_t present = rc_u8(&r);
-                    if (present) {
-                        int32_t item_id = rc_varint(&r);
+                    uint16_t raw_id = rc_u16(&r); /* Short (i16) — NOT byte+VarInt */
+                    if (raw_id != 0xFFFF) {
+                        int32_t item_id = (int32_t)raw_id;
                         rc_u8(&r); /* count (byte) */
                         rc_u16(&r); /* damage (short) */
                         rc_skip_nbt(&r);
@@ -1134,12 +1139,12 @@ static void net_dispatch_play(const uint8_t *pk, int32_t len) {
                     } else if (slot >= 0 && slot < 9) {
                         g_net.hotbar_items[slot] = 0;
                         if (slot == g_net.selected_slot) {
-                            g_net.held_item_id = 0;
-                            g_net.have_held_item = 1;
-                        }
+                        g_net.held_item_id = 0;
+                        g_net.have_held_item = 1;
                     }
                 }
-                break;
+            }
+            break;
             case 0x35: handle_respawn(&r); break;
         case 0x0F: handle_chat(&r); break;
         case 0x1A: handle_disconnect("play", &r); break;
