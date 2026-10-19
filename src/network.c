@@ -588,14 +588,10 @@ static void handle_join_game(RCUR *r) {
     log_debug("play: join game eid=%d dim=%d gm=%d world=%s (already_in_play=%d)",
               g_net.entity_id, g_net.dimension, g_net.gamemode, wtype, already_in_play);
 
-    /* Only reset fallback state on FIRST join game (phase transition to PLAY), not respawns */
-    if (g_net.phase != PHASE_PLAY) {
-        position_look_received = 0;
-        last_position_look_time = sceKernelGetProcessTimeWide();
-    } else {
-        /* For respawns, keep position but reset timer */
-        last_position_look_time = sceKernelGetProcessTimeWide();
-    }
+    /* Reset fallback state on JoinGame — server sends new PositionAndLook */
+    position_look_received = 0;
+    last_position_look_time = sceKernelGetProcessTimeWide();
+
     /* Reset teleport confirm tracking on JoinGame — server resets teleportId counter */
     last_confirmed_tid = -1;
 
@@ -1043,6 +1039,10 @@ static void handle_respawn(RCUR *r) {
     }
     log_debug("respawn: server respawn received, position reset (health=%.1f, show_respawn=%d)",
               g_player ? g_player->health : -1.0f, show_respawn);
+
+    /* Reset PositionAndLook tracking — server will send new PositionAndLook for respawned player */
+    position_look_received = 0;
+    last_confirmed_tid = -1;
 
     /* Clear all chunks so the server's new chunk stream starts fresh.
        Leaving stale chunks loaded causes OOB writes when the server
